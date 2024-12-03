@@ -337,6 +337,21 @@ public:
      */
     int write_error = 0;
 
+    /*
+     * Commit state for this inode.
+     * This is used to track the state of the commit operation for this inode.
+     * It's used to ensure that we don't send multiple commit requests for the
+     * same inode.
+     */
+    typedef enum {
+        commit_not_running = 0,
+        commit_pending = 1,
+        commit_in_progress = 2,
+        invalid_state = 3,
+    } commit_state_t;
+
+    commit_state_t commit_state;
+
     /**
      * TODO: Initialize attr with postop attributes received in the RPC
      *       response.
@@ -981,6 +996,64 @@ public:
      }
 
     /**
+     * Get the commit state for this inode.
+     */
+    commit_state_t get_commit_state()
+    {
+        assert(commit_state < invalid_state);
+        return commit_state;
+    }
+
+    /**
+     * Is commit pending for this inode?
+     */
+    bool is_commit_pending()
+    {
+        assert(commit_state < invalid_state);
+        return (commit_state == commit_pending);
+    }
+
+    /**
+     * Set commit_in_progress state for this inode.
+     */
+    void set_commit_in_progress()
+    {
+        assert(commit_state < invalid_state);
+        assert(commit_state != commit_in_progress);
+        commit_state = commit_in_progress;
+    }
+
+    /**
+     * Set commit_in_pending state for this inode.
+     * Note this is set to let flushing task know that commit is pending and start commit task.
+     */
+    void set_commit_in_pending()
+    {
+        assert(commit_state < invalid_state);
+        assert(commit_state == commit_not_running);
+        commit_state = commit_pending;
+    }
+
+    /**
+     * Clear commit_in_progress state for this inode.
+     */
+    void clear_commit_in_progress()
+    {
+        assert(commit_state < invalid_state);
+        assert(commit_state == commit_in_progress);
+        commit_state = commit_not_running;
+    }
+
+    /**
+     * Is commit in progress for this inode?
+     */
+    bool is_commit_progress() const
+    {
+        assert(commit_state < invalid_state);
+        return (commit_state == commit_in_progress || commit_state == commit_pending);
+    }
+
+    /**
      * Increment lookupcnt of the inode.
      */
     void incref() const
@@ -1148,6 +1221,12 @@ public:
      * NFS server in a single write call.
      */
     void sync_membufs(std::vector<bytes_chunk> &bcs, bool is_flush);
+
+    /**
+     * Commit the flushed membufs in the file cache to the NFS server.
+     * Issue commit_rpc with offset=0, length=0 to commit all the unstable writes.
+     */
+    void commit_membufs();
 
     /**
      * Called when last open fd is closed for a file.

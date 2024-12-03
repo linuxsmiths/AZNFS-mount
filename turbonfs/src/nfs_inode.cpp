@@ -370,6 +370,22 @@ int nfs_inode::get_actimeo_max() const
     }
 }
 
+/**
+ * commit_membufs() is called by writer thread to commit flushed membufs.
+ */
+void nfs_inode::commit_membufs()
+{
+    /*
+     * Create the commit task to carry out the write.
+     */
+    struct rpc_task *commit_task =
+                get_client()->get_rpc_task_helper()->alloc_rpc_task(FUSE_FLUSH);
+    commit_task->init_flush(nullptr /* fuse_req */, ino);
+    assert(commit_task->rpc_api->pvt == nullptr);
+
+    commit_task->issue_commit_rpc();
+}
+
 void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
 {
     if (bc_vec.empty()) {

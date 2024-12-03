@@ -109,6 +109,8 @@ namespace MB_Flag {
        Dirty              = (1 << 2), // Data in membuf is newer than the Blob.
        Flushing           = (1 << 3), // Data from dirty membuf is being synced
                                       // to Blob.
+       CommitPending      = (1 << 4), // Data from dirty membuf is flushed to Blob (Unstable),
+                                      // commit pending.
     };
 }
 
@@ -315,6 +317,14 @@ struct membuf
 
     void set_flushing();
     void clear_flushing();
+
+    bool is_commit_pending() const
+    {
+        return (flag & MB_Flag::CommitPending);
+    }
+
+    void set_commit_pending();
+    void clear_commit_pending();
 
     bool is_inuse() const
     {
@@ -636,7 +646,7 @@ public:
     bool safe_to_release() const
     {
         const struct membuf *mb = get_membuf();
-        return !mb->is_inuse() && !mb->is_dirty();
+        return !mb->is_inuse() && !mb->is_dirty() && !mb->is_commit_pending();
     }
 
     /**
@@ -1022,6 +1032,7 @@ public:
      * clear_inuse().
      */
     std::vector<bytes_chunk> get_dirty_bc_range(uint64_t st_off, uint64_t end_off) const;
+    std::vector<bytes_chunk> get_commit_pending_bc_range() const;
 
     /**
      * Drop cached data in the given range.
@@ -1125,6 +1136,26 @@ public:
          * bytes_dirty < bytes_flushing, hence we need the protection.
          */
         return std::max((int64_t)(bytes_dirty - bytes_flushing), int64_t(0));
+    }
+
+    /**
+     * Get the amount of data which is flushed, needs to be committed.
+     * This excludes the dirty data which is currently not flushed or in process of flushing.
+     * It gets incremented on write completion of dirty data flushed to BLOB with unstable parameter.
+     */
+    uint64_t get_bytes_to_commit() const
+    {
+        return bytes_commit_pending;
+    }
+
+    /**
+     * Returns true if there are bytes_flushing.
+     * bytes_flushing non-zero tells that there are dirty membufs which are in
+     * process of being flushed to the Blob.
+     */
+    bool is_flushing_in_progress() const
+    {
+        return bytes_flushing > 0;
     }
 
     /**
@@ -1298,6 +1329,7 @@ public:
     std::atomic<uint64_t> bytes_cached = 0;
     std::atomic<uint64_t> bytes_dirty = 0;
     std::atomic<uint64_t> bytes_flushing = 0;
+    std::atomic<uint64_t> bytes_commit_pending = 0;
     std::atomic<uint64_t> bytes_uptodate = 0;
     std::atomic<uint64_t> bytes_inuse = 0;
     std::atomic<uint64_t> bytes_locked = 0;
@@ -1314,6 +1346,7 @@ public:
     static std::atomic<uint64_t> bytes_cached_g;
     static std::atomic<uint64_t> bytes_dirty_g;
     static std::atomic<uint64_t> bytes_flushing_g;
+    static std::atomic<uint64_t> bytes_commit_pending_g;
     static std::atomic<uint64_t> bytes_uptodate_g;
     static std::atomic<uint64_t> bytes_inuse_g;
     static std::atomic<uint64_t> bytes_locked_g;
