@@ -485,8 +485,14 @@ struct bc_iovec
                 assert(mb->is_inuse() && mb->is_locked());
                 assert(mb->is_flushing() && mb->is_dirty() && mb->is_uptodate());
 
-                mb->set_commit_pending();
+                /**
+                 * Update the membuf flags.
+                 * Set the commit_pending flag so that this membuf accounted for commit RPC.
+                 * Clear the dirty flag first so that bytes_dirty + bytes_commit_pending is always
+                 * less than or equal to bytes_allocated.
+                 */
                 mb->clear_dirty();
+                mb->set_commit_pending();
                 mb->clear_flushing();
                 mb->clear_locked();
                 mb->clear_inuse();

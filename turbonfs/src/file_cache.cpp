@@ -339,7 +339,7 @@ void membuf::set_commit_pending()
     assert(is_locked());
     assert(is_inuse());
     // Dirty MUST be uptodate.
-    assert(is_dirty() && is_uptodate() && is_flushing());
+    assert(is_uptodate() && is_flushing());
 
     flag |= MB_Flag::CommitPending;
 
@@ -1955,6 +1955,17 @@ void bytes_chunk_cache::clear_nolock()
 
     assert(bytes_allocated <= bytes_allocated_g);
     assert(bytes_cached <= bytes_cached_g);
+    assert((bytes_dirty + bytes_commit_pending) <= bytes_allocated);
+
+    /**
+     * If the bytes_dirty + bytes_commit_pending == bytes_allocated, then
+     * we can't do anything till all the dirty data is written to the Blob.
+     */
+    if ((bytes_dirty + bytes_commit_pending) == bytes_allocated) {
+        AZLogDebug("[{}] Cache purge: backing_file_name={} is already clean",
+                   CACHE_TAG, backing_file_name);
+        return;
+    }
 
     /*
      * We go over all the bytes_chunk to see if they can be freed. Following
@@ -2122,7 +2133,8 @@ void bytes_chunk_cache::clear_nolock()
     }
 }
 
-std::vector<bytes_chunk> bytes_chunk_cache::get_commit_pending_bc_range() const
+std::vector<bytes_chunk>
+bytes_chunk_cache::get_commit_pending_bc_range() const
 {
     std::vector<bytes_chunk> bc_vec;
 
