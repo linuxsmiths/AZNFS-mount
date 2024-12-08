@@ -457,7 +457,7 @@ void nfs_client::jukebox_runner()
                                 js->rpc_api->readdir_task.get_offset(),
                                 js->rpc_api->readdir_task.get_fuse_file());
                     break;
-                case FUSE_FLUSH:
+                case FUSE_WRITE:
                     AZLogWarn("[JUKEBOX REISSUE] flush(req={}, ino={})",
                               fmt::ptr(js->rpc_api->req),
                               js->rpc_api->flush_task.get_ino());
@@ -1468,18 +1468,21 @@ void nfs_client::jukebox_flush(struct api_task_info *rpc_api)
     assert(rpc_api->pvt != nullptr);
     assert(rpc_api->optype == FUSE_FLUSH);
 
-    struct rpc_task *flush_task =
-        get_rpc_task_helper()->alloc_rpc_task(FUSE_FLUSH);
-    flush_task->init_flush(nullptr /* fuse_req */,
-                           rpc_api->flush_task.get_ino());
+    struct rpc_task *write_task =
+        get_rpc_task_helper()->alloc_rpc_task(FUSE_WRITE);
+    write_task->init_write(nullptr /* fuse_req */,
+                           rpc_api->write_task.get_ino(),
+                           nullptr /* bufv */,
+                           0 /* size */,
+                           0 /* offset */);
     // Any new task should start fresh as a parent task.
-    assert(flush_task->rpc_api->parent_task == nullptr);
+    assert(write_task->rpc_api->parent_task == nullptr);
 
     [[maybe_unused]] struct bc_iovec *bciov = (struct bc_iovec *) rpc_api->pvt;
     assert(bciov->magic == BC_IOVEC_MAGIC);
 
     // TODO: Make this a unique_ptr?
-    flush_task->rpc_api->pvt = rpc_api->pvt;
+    write_task->rpc_api->pvt = rpc_api->pvt;
     rpc_api->pvt = nullptr;
 
     /*
@@ -1492,7 +1495,7 @@ void nfs_client::jukebox_flush(struct api_task_info *rpc_api)
      */
     assert(rpc_api->parent_task == nullptr);
 
-    flush_task->issue_write_rpc();
+    write_task->issue_write_rpc();
 }
 
 /*

@@ -93,9 +93,11 @@ public:
          * RPCs.
          */
         assert(_optype != FUSE_RELEASE);
+        #if 0
         if (_optype == FUSE_FLUSH) {
             _optype = FUSE_WRITE;
         }
+        #endif
 
         optype = _optype;
         stamp.start = start_usec;
