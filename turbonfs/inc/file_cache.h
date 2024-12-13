@@ -1138,6 +1138,12 @@ public:
         return std::max((int64_t)(bytes_dirty - bytes_flushing), int64_t(0));
     }
 
+
+    uint64_t get_bytes_flushing() const
+    {
+        return bytes_flushing;
+    }
+
     /**
      * Get the amount of data which is flushed, needs to be committed.
      * This excludes the dirty data which is currently not flushed or in process of flushing.

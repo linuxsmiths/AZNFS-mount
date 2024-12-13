@@ -32,6 +32,7 @@ nfs_inode::nfs_inode(const struct nfs_fh3 *filehandle,
     assert(client->magic == NFS_CLIENT_MAGIC);
     assert(write_error == 0);
     assert(stable_write == false);
+    assert(commit_state == commit_not_running);
 
 #ifndef ENABLE_NON_AZURE_NFS
     // Blob NFS supports only these file types.
@@ -595,11 +596,24 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          * membuf remains uptodate after the copy.
          */
 try_copy:
-        if (bc.maps_full_membuf() || mb->is_uptodate()) {
+        if ((bc.maps_full_membuf() || mb->is_uptodate()) &&
+            !(mb->is_flushing() || mb->is_commit_pending()))
+        {
             assert(bc.length <= remaining);
             ::memcpy(bc.get_buffer(), buf, bc.length);
             mb->set_uptodate();
-            mb->set_dirty();
+
+            /*
+            * If the membuf was not dirty, mark it dirty.
+            * It may happen in case of random writes where overwrite
+            * to previous data is done. In such cases the membuf is
+            * already dirty we don't need to mark it dirty again as it
+            * cause dirty membuf accounting to go wrong.
+            */
+            if (!mb->is_dirty()) {
+                mb->set_dirty();
+            }
+
             // Update file size in inode'c cached attr.
             on_cached_write(bc.offset, bc.length);
         } else {
@@ -649,7 +663,8 @@ try_copy:
             inject_eagain = inject_error();
 #endif
 
-            if (mb->is_uptodate() && !inject_eagain) {
+            if (mb->is_uptodate() &&
+                !(mb->is_flushing() || mb->is_commit_pending() || inject_eagain)) {
                 AZLogWarn("[{}] Membuf [{}, {}) (bc [{}, {})) is now uptodate, "
                           "retrying copy", ino,
                           mb->offset, mb->offset+mb->length,

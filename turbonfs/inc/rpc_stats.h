@@ -233,6 +233,7 @@ public:
                    optype == FUSE_READDIRPLUS ||
                    optype == FUSE_READ ||
                    optype == FUSE_WRITE ||
+                   optype == FUSE_FLUSH ||
                    optype == FUSE_GETATTR ||
                    optype == FUSE_LOOKUP ||
                    optype == FUSE_SETATTR);

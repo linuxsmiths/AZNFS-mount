@@ -255,6 +255,13 @@ private:
      */
     struct stat attr;
 
+    /*
+     * In start we set the stable_write flag to false as write pattern is unknown.
+     * stable_write flag is set to true in case of pattern is non-sequential.
+     * Once set to true, it will remain true for the life of the inode.
+     */
+    bool stable_write = false;
+
 public:
     /*
      * Fuse inode number.
@@ -350,7 +357,7 @@ public:
         invalid_state = 3,
     } commit_state_t;
 
-    commit_state_t commit_state;
+    commit_state_t commit_state = commit_not_running;
 
     /**
      * TODO: Initialize attr with postop attributes received in the RPC
@@ -849,6 +856,36 @@ public:
         }
     }
 
+    /*
+     * This function checks, whether switch to stable write or not.
+     */
+    bool check_stable_write_required(off_t offset) const
+    {
+        /*
+         * If stable_write is already set, we don't need to do anything.
+         * We don't need lock here as once stable_write is set it's never
+         * unset.
+         */
+        if (stable_write) {
+            return false;
+        }
+
+        /*
+         * If current write is not append write, then we can't go for unstable writes
+         * It may be overwrite to existing data and we don't have the knowldege of existing
+         * block list, it maye require read modified write. So, we can't go for unstable write.
+         * Similarly, if the offset is more than end of the file, we need to write zero block
+         * in between the current end of the file and the offset.
+         */
+        std::unique_lock<std::shared_mutex> lock(ilock_1);
+        if (offset != attr.st_size) {
+            AZLogInfo("Stable write required as offset:{} is not at the end of the file:{}", offset, attr.st_size);
+            return true;
+        }
+
+        return false;
+    }
+
     /**
      * Check if [offset, offset+length) lies within the current RA window.
      * bytes_chunk_cache would call this to find out if a particular membuf
@@ -1014,7 +1051,7 @@ public:
     }
 
     /**
-     * Set commit_in_progress state for this inode.
+     * Set commit_in_progress state for this inode under the lock.
      */
     void set_commit_in_progress()
     {
@@ -1365,6 +1402,22 @@ public:
     int get_write_error() const
     {
         return write_error;
+    }
+
+    /**
+     * Set the stable write flag.
+     */
+    void set_stable_write()
+    {
+        stable_write = true;
+    }
+
+    /**
+     * Check if the inode has stable write flag set.
+     */
+    bool is_stable_write() const
+    {
+        return stable_write;
     }
 
     /**

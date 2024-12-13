@@ -582,6 +582,7 @@ void membuf::set_dirty()
      */
     assert(is_locked());
     assert(is_inuse());
+    assert(!is_dirty());
 
     flag |= MB_Flag::Dirty;
 

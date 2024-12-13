@@ -458,6 +458,12 @@ void nfs_client::jukebox_runner()
                                 js->rpc_api->readdir_task.get_fuse_file());
                     break;
                 case FUSE_WRITE:
+                    AZLogWarn("[JUKEBOX REISSUE] write(req={}, ino={})",
+                              fmt::ptr(js->rpc_api->req),
+                              js->rpc_api->write_task.get_ino());
+                    jukebox_write(js->rpc_api);
+                    break;
+                case FUSE_FLUSH:
                     AZLogWarn("[JUKEBOX REISSUE] flush(req={}, ino={})",
                               fmt::ptr(js->rpc_api->req),
                               js->rpc_api->flush_task.get_ino());
@@ -1455,18 +1461,50 @@ void nfs_client::read(
 }
 
 /*
- * This function will be called only to retry the write requests that failed
+ * This function will be called only to retry the commit requests that failed
  * with JUKEBOX error.
  * rpc_api defines the RPC request that need to be retried.
  */
 void nfs_client::jukebox_flush(struct api_task_info *rpc_api)
 {
     /*
-     * For write task pvt has write_iov_context, which has copy of byte_chunk vector.
+     * For commit task pvt has byte_chunk vector which are supposed to be commited.
      * To proceed it should be valid.
      */
     assert(rpc_api->pvt != nullptr);
     assert(rpc_api->optype == FUSE_FLUSH);
+
+    /*
+     * req is valid in case of release/flush tasks only.
+     * As we do commit in-line.
+     */
+    struct rpc_task *commit_task =
+        get_rpc_task_helper()->alloc_rpc_task(FUSE_FLUSH);
+    commit_task->init_flush(rpc_api->req /* fuse_req */,
+                            rpc_api->flush_task.get_ino());
+
+    commit_task->rpc_api->pvt = rpc_api->pvt;
+    rpc_api->pvt = nullptr;
+
+    // Any new task should start fresh as a parent task.
+    assert(commit_task->rpc_api->parent_task == nullptr);
+
+    commit_task->issue_commit_rpc();
+}
+
+/*
+ * This function will be called only to retry the write requests that failed
+ * with JUKEBOX error.
+ * rpc_api defines the RPC request that need to be retried.
+ */
+void nfs_client::jukebox_write(struct api_task_info *rpc_api)
+{
+    /*
+     * For write task pvt has write_iov_context, which has copy of byte_chunk vector.
+     * To proceed it should be valid.
+     */
+    assert(rpc_api->pvt != nullptr);
+    assert(rpc_api->optype == FUSE_WRITE);
 
     struct rpc_task *write_task =
         get_rpc_task_helper()->alloc_rpc_task(FUSE_WRITE);
