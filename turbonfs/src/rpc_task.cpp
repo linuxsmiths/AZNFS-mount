@@ -1129,7 +1129,7 @@ void rpc_task::issue_write_rpc()
     args.offset = offset;
     args.count = length;
     args.stable = inode->is_stable_write() ? FILE_SYNC : UNSTABLE;
-    set_task_csched(inode->is_stable_write());
+    // set_task_csched(inode->is_stable_write());
 
     do {
         rpc_retry = false;
@@ -2106,6 +2106,11 @@ void rpc_task::switch_to_stable_write()
     }
 
     inode->set_stable_write();
+
+    assert(inode->is_stable_write());
+    assert(inode->get_filecache()->get_bytes_to_flush() == 0);
+    assert(inode->get_filecache()->get_bytes_to_commit() == 0);
+    assert(inode->get_filecache()->get_bytes_flushing() == 0);
     return;
 }
 
@@ -2119,12 +2124,12 @@ void rpc_task::run_write()
     const bool sparse_write = (offset > inode->get_file_size(true));
     uint64_t extent_left = 0;
     uint64_t extent_right = 0;
-    const bool switch_to_stable = inode->check_stable_write_required(offset);
+    bool switch_to_stable = inode->check_stable_write_required(offset);
 
-    if (switch_to_stable)
-    {
+    if (switch_to_stable) {
         AZLogDebug("[{}] Switching to stable write", ino);
         switch_to_stable_write();
+        switch_to_stable = false;
     }
 
     /*
@@ -2168,14 +2173,6 @@ void rpc_task::run_write()
         return;
     }
 
-    if (switch_to_stable)
-    {
-        assert(inode->is_stable_write());
-        assert(inode->get_filecache()->get_bytes_to_flush() == 0);
-        assert(inode->get_filecache()->get_bytes_to_commit() == 0);
-        assert(inode->get_filecache()->get_bytes_flushing() == 0);
-    }
-
     /*
      * Copy application data into chunk cache and initiate writes for all
      * membufs. We don't wait for the writes to actually finish, which means
@@ -2194,8 +2191,23 @@ void rpc_task::run_write()
      * unlikely that we need to repeat more than that.
      */
     for (int i = 0; i < 10; i++) {
-        error_code = inode->copy_to_cache(bufv, offset,
+        error_code = inode->copy_to_cache(bufv, offset, switch_to_stable,
                                           &extent_left, &extent_right);
+
+        if (error_code == EACCES) {
+            assert(switch_to_stable);
+            AZLogDebug("[{}] Switching to stable write", ino);
+
+            switch_to_stable_write();
+            switch_to_stable = false;
+
+            /*
+             * let's get the write_error again, as it might have been set
+             * by switch_to_stable_write().
+             */
+            error_code = inode->get_write_error();
+        }
+
         if (error_code != EAGAIN) {
             break;
         }
@@ -2392,8 +2404,6 @@ void rpc_task::run_flush()
 {
     const fuse_ino_t ino = rpc_api->flush_task.get_ino();
     struct nfs_inode *const inode = get_client()->get_nfs_inode_from_ino(ino);
-
-    AZLogInfo("Flush command");
 
     while (inode->is_commit_progress()) {
         AZLogInfo("Wait for commit to finish before doing flush");

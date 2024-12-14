@@ -1208,6 +1208,15 @@ public:
     }
 
     /**
+     * This is function check whether we need to switch to stable write or not.
+     * It checks if membuf is flushed or not and if it is not flushed then it
+     * we can overwrite the data in the membuf. If membuf is flushed then we
+     * need to switch to stable write.
+     */
+    bool need_stable_write(bool verify_stable_writes_required,
+                            const struct membuf *mb) const;
+
+    /**
      * Copy application data into the inode's file cache.
      *
      * bufv: fuse_bufvec containing application data, passed by fuse.
@@ -1231,6 +1240,7 @@ public:
      */
     int copy_to_cache(const struct fuse_bufvec* bufv,
                       off_t offset,
+                      bool verify_switch_to_stable_write,
                       uint64_t *extent_left,
                       uint64_t *extent_right);
 

@@ -514,11 +514,39 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
     }
 }
 
+bool nfs_inode::need_stable_write(bool verify_stable_writes_required,
+                                  const struct membuf *mb) const
+{
+    if (!verify_stable_writes_required) {
+        return false;
+    }
+
+    /*
+     * Overwrite case, if the membuf is already in flushing/commit_pending state
+     * then we can't overwrite it, and need to switch to stable write.
+     */
+    if (mb->is_flushing() || mb->is_commit_pending()) {
+        return true;
+    }
+
+    /*
+     * This is new membuf which means it's exceed the end of the file, so we need
+     * to write zero block in between the current end of the file and the offset which
+     * unstable writes don't support, we need to switch to stable write.
+     */
+    if (!mb->is_dirty()) {
+        return true;
+    }
+
+    return false;
+}
+
 /**
  * Note: This takes exclusive lock on ilock_1.
  */
 int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
                              off_t offset,
+                             bool verify_stable_writes_required,
                              uint64_t *extent_left,
                              uint64_t *extent_right)
 {
@@ -578,7 +606,7 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          * TODO: If we have copied at least one byte, do not fail but instead
          *       let the caller know that we copied ledd.
          */
-        if (err == EAGAIN) {
+        if (err == EAGAIN || err == EACCES) {
             mb->clear_inuse();
             assert(remaining >= bc.length);
             remaining -= bc.length;
@@ -596,9 +624,21 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          * membuf remains uptodate after the copy.
          */
 try_copy:
-        if ((bc.maps_full_membuf() || mb->is_uptodate()) &&
-            !(mb->is_flushing() || mb->is_commit_pending()))
-        {
+        if (need_stable_write(verify_stable_writes_required, mb)) {
+            AZLogWarn("[{}] Switch to stable write, Overwrite of membuf [{}, {}]",
+                    ino,
+                    mb->offset,
+                    mb->offset+mb->length);
+            assert(err == 0);
+            err = EACCES;
+
+            /*
+             * We don't need to release the membuf here as we are going to
+             * ask for membuf again in next iteration.
+             */
+        } else if ((bc.maps_full_membuf() || mb->is_uptodate()) &&
+                  !(mb->is_flushing() || mb->is_commit_pending())) {
+
             assert(bc.length <= remaining);
             ::memcpy(bc.get_buffer(), buf, bc.length);
             mb->set_uptodate();
