@@ -1129,7 +1129,7 @@ void rpc_task::issue_write_rpc()
     args.offset = offset;
     args.count = length;
     args.stable = inode->is_stable_write() ? FILE_SYNC : UNSTABLE;
-    // set_task_csched(inode->is_stable_write());
+    set_task_csched(inode->is_stable_write());
 
     do {
         rpc_retry = false;
@@ -2091,6 +2091,12 @@ void rpc_task::switch_to_stable_write()
     assert(inode->get_filecache()->get_bytes_to_flush() == 0);
     assert(inode->get_filecache()->get_bytes_flushing() == 0);
 
+    if (inode->get_filecache()->get_bytes_to_commit() == 0) {
+        AZLogDebug("[{}] Nothing to commit, switching to stable write", ino);
+        inode->set_stable_write();
+        return;
+    }
+    
     /*
      * We don't need lock here as no flush is in progress and we are the only
      * thread that can write to the inode. But still take the lock to be safe.
@@ -2105,12 +2111,10 @@ void rpc_task::switch_to_stable_write()
         ::usleep(1000);
     }
 
-    inode->set_stable_write();
-
-    assert(inode->is_stable_write());
     assert(inode->get_filecache()->get_bytes_to_flush() == 0);
     assert(inode->get_filecache()->get_bytes_to_commit() == 0);
     assert(inode->get_filecache()->get_bytes_flushing() == 0);
+    inode->set_stable_write();
     return;
 }
 
@@ -2126,10 +2130,12 @@ void rpc_task::run_write()
     uint64_t extent_right = 0;
     bool switch_to_stable = inode->check_stable_write_required(offset);
 
-    if (switch_to_stable) {
+    if (sparse_write && (inode->is_stable_write() == false)) {
+        AZLogInfo("[{}] Sparse write detected off {}, file end {}", ino, offset, inode->get_file_size(true));
+        assert(switch_to_stable == false);
+
         AZLogDebug("[{}] Switching to stable write", ino);
         switch_to_stable_write();
-        switch_to_stable = false;
     }
 
     /*
@@ -2356,16 +2362,18 @@ void rpc_task::run_write()
     if (sparse_write || inline_write) {
         INC_GBL_STATS(inline_writes, 1);
 
-        AZLogDebug("[{}] Inline write (sparse={}), {} bytes, extent @ [{}, {})",
+        AZLogInfo("[{}] Inline write (sparse={}), {} bytes, extent @ [{}, {})",
                    ino, sparse_write, (extent_right - extent_left),
                    extent_left, extent_right);
 
-        AZLogInfo("[START] Wait for commit in progress to finish");
+        auto time_start = std::chrono::system_clock::now();
         while (inode->is_commit_progress()) {
            // AZLogInfo("Wait for commit in progress to finish, sleep for 1msec");
             ::usleep(1000);
         }
-        AZLogInfo("[END] Wait for commit in progress to finish");
+        auto time_end = std::chrono::system_clock::now();
+        AZLogInfo("Time taken to wait for commit to finish: {}",
+                  std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count());
 
         const int err = inode->flush_cache_and_wait(extent_left, extent_right);
         if (err == 0) {

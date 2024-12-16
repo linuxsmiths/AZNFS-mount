@@ -877,9 +877,9 @@ public:
          * Similarly, if the offset is more than end of the file, we need to write zero block
          * in between the current end of the file and the offset.
          */
-        std::unique_lock<std::shared_mutex> lock(ilock_1);
-        if (offset != attr.st_size) {
+        if (offset < attr.st_size) {
             AZLogInfo("Stable write required as offset:{} is not at the end of the file:{}", offset, attr.st_size);
+
             return true;
         }
 
@@ -1419,6 +1419,7 @@ public:
      */
     void set_stable_write()
     {
+        assert(!stable_write);
         stable_write = true;
     }
 

@@ -525,16 +525,7 @@ bool nfs_inode::need_stable_write(bool verify_stable_writes_required,
      * Overwrite case, if the membuf is already in flushing/commit_pending state
      * then we can't overwrite it, and need to switch to stable write.
      */
-    if (mb->is_flushing() || mb->is_commit_pending()) {
-        return true;
-    }
-
-    /*
-     * This is new membuf which means it's exceed the end of the file, so we need
-     * to write zero block in between the current end of the file and the offset which
-     * unstable writes don't support, we need to switch to stable write.
-     */
-    if (!mb->is_dirty()) {
+    if (mb->is_flushing() || mb->is_commit_pending() || mb->is_uptodate()) {
         return true;
     }
 
@@ -632,10 +623,9 @@ try_copy:
             assert(err == 0);
             err = EACCES;
 
-            /*
-             * We don't need to release the membuf here as we are going to
-             * ask for membuf again in next iteration.
-             */
+            mb->clear_inuse();
+            filecache_handle->release(mb->offset, mb->length);
+            mb->set_inuse();
         } else if ((bc.maps_full_membuf() || mb->is_uptodate()) &&
                   !(mb->is_flushing() || mb->is_commit_pending())) {
 
