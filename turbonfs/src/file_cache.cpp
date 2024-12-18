@@ -16,6 +16,8 @@
 #ifndef DEBUG_FILE_CACHE
 #undef AZLogVerbose
 #define AZLogVerbose(fmt, ...)    /* nothing */
+#undef AZLogWarn
+#define AZLogWarn(fmt, ...)
 #else
 /*
  * Debug is not enabled early on when self-tests run, so use Info.
@@ -38,6 +40,7 @@ namespace aznfsc {
 /* static */ std::atomic<uint64_t> bytes_chunk_cache::bytes_cached_g = 0;
 /* static */ std::atomic<uint64_t> bytes_chunk_cache::bytes_dirty_g = 0;
 /* static */ std::atomic<uint64_t> bytes_chunk_cache::bytes_flushing_g = 0;
+/* static */ std::atomic<uint64_t> bytes_chunk_cache::bytes_commit_pending_g = 0;
 /* static */ std::atomic<uint64_t> bytes_chunk_cache::bytes_uptodate_g = 0;
 /* static */ std::atomic<uint64_t> bytes_chunk_cache::bytes_inuse_g = 0;
 /* static */ std::atomic<uint64_t> bytes_chunk_cache::bytes_locked_g = 0;
@@ -315,6 +318,78 @@ void membuf::clear_uptodate()
  * so that any thread wanting to flush a membuf can note this and doesn't wait
  * for membuf lock (for issuing the flush).
  */
+void membuf::set_commit_pending()
+{
+    /*
+     * Must be locked and inuse.
+     * Note that following is the correct sequence of operations.
+     *
+     * get()
+     * if (is_dirty() && !is_flushing())
+     * {
+     *  set_locked()
+     *  set_flushing()
+     *  << write membuf data to the blob >>
+     *  clear_dirty()
+     *  clear_flushing()
+     *  clear_locked()
+     *  clear_inuse()
+     * }
+     */
+    assert(is_locked());
+    assert(is_inuse());
+    // Dirty MUST be uptodate.
+    assert(is_uptodate() && is_flushing());
+
+    flag |= MB_Flag::CommitPending;
+
+    bcc->bytes_commit_pending_g += length;
+    bcc->bytes_commit_pending += length;
+
+    AZLogDebug("Set commit pending membuf [{}, {}), fd={}",
+               offset, offset+length, backing_file_fd);
+}
+
+/**
+ * Must be called after flushing dirty membuf to Blob.
+ */
+void membuf::clear_commit_pending()
+{
+    // See comment in set_flushing() above.
+    assert(is_locked());
+    assert(is_inuse());
+
+    // No spurious calls to clear_flushing().
+    assert(is_commit_pending());
+
+    /*
+     * clear_flushing() must be called after clear_dirty().
+     * In case WRITE RPC fails, we don't clear dirty flag, in that case this
+     * assert will fail. We still leave it as it helps catch workflow bugs and
+     * we mostly do hard mount where write never fails.
+     *
+     * TODO: Remove me once we have enough testing.
+     *       Don't release it to production.
+     */
+    assert(!is_dirty());
+
+    flag &= ~MB_Flag::CommitPending;
+
+    assert(bcc->bytes_commit_pending >= length);
+    assert(bcc->bytes_commit_pending_g >= length);
+    bcc->bytes_commit_pending -= length;
+    bcc->bytes_commit_pending_g -= length;
+
+    AZLogDebug("Clear commit pending membuf [{}, {}), fd={}",
+               offset, offset+length, backing_file_fd);
+}
+
+
+/**
+ * Must be called to mark membuf as "currently flushing dirty data to Blob".
+ * so that any thread wanting to flush a membuf can note this and doesn't wait
+ * for membuf lock (for issuing the flush).
+ */
 void membuf::set_flushing()
 {
     /*
@@ -507,6 +582,7 @@ void membuf::set_dirty()
      */
     assert(is_locked());
     assert(is_inuse());
+    assert(!is_dirty());
 
     flag |= MB_Flag::Dirty;
 
@@ -676,7 +752,8 @@ std::vector<bytes_chunk> bytes_chunk_cache::scan(uint64_t offset,
     assert(offset < AZNFSC_MAX_FILE_SIZE);
     assert(length > 0);
     // Cannot write more than AZNFSC_MAX_CHUNK_SIZE in a single call.
-    assert(length <= AZNFSC_MAX_CHUNK_SIZE);
+    assert(length <= AZNFSC_MAX_CHUNK_SIZE ||
+           (action == scan_action::SCAN_ACTION_RELEASE));
     assert((offset + length) <= AZNFSC_MAX_FILE_SIZE);
     assert((action == scan_action::SCAN_ACTION_GET) ||
            (action == scan_action::SCAN_ACTION_RELEASE));
@@ -1763,6 +1840,17 @@ void bytes_chunk_cache::inline_prune()
             continue;
         }
 
+        if (mb->is_commit_pending()) {
+            AZLogDebug("[{}] inline_prune(): skipping as membuf(offset={}, "
+                       "length={}) is commit_pending (flushing={}, uptodate={})",
+                       fmt::ptr(this), mb->offset, mb->length,
+                       mb->is_flushing() ? "yes" : "no",
+                       mb->is_uptodate() ? "yes" : "no");
+            dirty++;
+            dirty_bytes += mb->allocated_length;
+            continue;
+        }
+
         AZLogDebug("[{}] inline_prune(): deleting membuf(offset={}, length={})",
                    CACHE_TAG, mb->offset, mb->length);
 
@@ -1868,6 +1956,17 @@ void bytes_chunk_cache::clear_nolock()
 
     assert(bytes_allocated <= bytes_allocated_g);
     assert(bytes_cached <= bytes_cached_g);
+    assert((bytes_dirty + bytes_commit_pending) <= bytes_allocated);
+
+    /**
+     * If the bytes_dirty + bytes_commit_pending == bytes_allocated, then
+     * we can't do anything till all the dirty data is written to the Blob.
+     */
+    if ((bytes_dirty + bytes_commit_pending) == bytes_allocated) {
+        AZLogDebug("[{}] Cache purge: backing_file_name={} is already clean",
+                   CACHE_TAG, backing_file_name);
+        return;
+    }
 
     /*
      * We go over all the bytes_chunk to see if they can be freed. Following
@@ -1930,8 +2029,8 @@ void bytes_chunk_cache::clear_nolock()
          * Has data to be written to Blob.
          * Cannot safely drop this from the cache.
          */
-        if (mb->is_dirty()) {
-            AZLogDebug("[{}] Cache purge: skipping dirty membuf(offset={}, "
+        if (mb->is_dirty() || mb->is_commit_pending()) {
+            AZLogDebug("[{}] Cache purge: skipping dirty/commit_pending membuf(offset={}, "
                        "length={})",
                        CACHE_TAG, mb->offset, mb->length);
             continue;
@@ -2033,6 +2132,33 @@ void bytes_chunk_cache::clear_nolock()
             AZLogDebug("Backing file {} deleted", backing_file_name);
         }
     }
+}
+
+std::vector<bytes_chunk>
+bytes_chunk_cache::get_commit_pending_bc_range() const
+{
+    std::vector<bytes_chunk> bc_vec;
+
+    // TODO: Make it shared lock.
+    const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
+    auto it = chunkmap.lower_bound(0);
+
+    while (it != chunkmap.cend() && it->first <= UINT64_MAX) {
+        const struct bytes_chunk& bc = it->second;
+        struct membuf *mb = bc.get_membuf();
+
+        if (mb->is_commit_pending()) {
+            mb->set_inuse();
+            mb->set_locked();
+            assert(!mb->is_dirty());
+            assert(mb->is_uptodate());
+            bc_vec.emplace_back(bc);
+        }
+
+        ++it;
+    }
+
+    return bc_vec;
 }
 
 std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_bc_range(uint64_t start_off, uint64_t end_off) const

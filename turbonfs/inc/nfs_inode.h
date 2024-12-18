@@ -255,6 +255,13 @@ private:
      */
     struct stat attr;
 
+    /*
+     * In start we set the stable_write flag to false as write pattern is unknown.
+     * stable_write flag is set to true in case of pattern is non-sequential.
+     * Once set to true, it will remain true for the life of the inode.
+     */
+    bool stable_write = false;
+
 public:
     /*
      * Fuse inode number.
@@ -336,6 +343,21 @@ public:
      * This is either 0 (no error) or a +ve errno value.
      */
     int write_error = 0;
+
+    /*
+     * Commit state for this inode.
+     * This is used to track the state of the commit operation for this inode.
+     * It's used to ensure that we don't send multiple commit requests for the
+     * same inode.
+     */
+    typedef enum {
+        commit_not_running = 0,
+        commit_pending = 1,
+        commit_in_progress = 2,
+        invalid_state = 3,
+    } commit_state_t;
+
+    commit_state_t commit_state = commit_not_running;
 
     /**
      * TODO: Initialize attr with postop attributes received in the RPC
@@ -847,6 +869,36 @@ public:
         }
     }
 
+    /*
+     * This function checks, whether switch to stable write or not.
+     */
+    bool check_stable_write_required(off_t offset) const
+    {
+        /*
+         * If stable_write is already set, we don't need to do anything.
+         * We don't need lock here as once stable_write is set it's never
+         * unset.
+         */
+        if (stable_write) {
+            return false;
+        }
+
+        /*
+         * If current write is not append write, then we can't go for unstable writes
+         * It may be overwrite to existing data and we don't have the knowldege of existing
+         * block list, it maye require read modified write. So, we can't go for unstable write.
+         * Similarly, if the offset is more than end of the file, we need to write zero block
+         * in between the current end of the file and the offset.
+         */
+        if (offset < attr.st_size) {
+            AZLogInfo("Stable write required as offset:{} is not at the end of the file:{}", offset, attr.st_size);
+
+            return true;
+        }
+
+        return false;
+    }
+
     /**
      * Check if [offset, offset+length) lies within the current RA window.
      * bytes_chunk_cache would call this to find out if a particular membuf
@@ -994,6 +1046,64 @@ public:
      }
 
     /**
+     * Get the commit state for this inode.
+     */
+    commit_state_t get_commit_state()
+    {
+        assert(commit_state < invalid_state);
+        return commit_state;
+    }
+
+    /**
+     * Is commit pending for this inode?
+     */
+    bool is_commit_pending()
+    {
+        assert(commit_state < invalid_state);
+        return (commit_state == commit_pending);
+    }
+
+    /**
+     * Set commit_in_progress state for this inode under the lock.
+     */
+    void set_commit_in_progress()
+    {
+        assert(commit_state < invalid_state);
+        assert(commit_state != commit_in_progress);
+        commit_state = commit_in_progress;
+    }
+
+    /**
+     * Set commit_in_pending state for this inode.
+     * Note this is set to let flushing task know that commit is pending and start commit task.
+     */
+    void set_commit_in_pending()
+    {
+        assert(commit_state < invalid_state);
+        assert(commit_state == commit_not_running);
+        commit_state = commit_pending;
+    }
+
+    /**
+     * Clear commit_in_progress state for this inode.
+     */
+    void clear_commit_in_progress()
+    {
+        assert(commit_state < invalid_state);
+        assert(commit_state == commit_in_progress);
+        commit_state = commit_not_running;
+    }
+
+    /**
+     * Is commit in progress for this inode?
+     */
+    bool is_commit_progress() const
+    {
+        assert(commit_state < invalid_state);
+        return (commit_state == commit_in_progress || commit_state == commit_pending);
+    }
+
+    /**
      * Increment lookupcnt of the inode.
      */
     void incref() const
@@ -1111,6 +1221,15 @@ public:
     }
 
     /**
+     * This is function check whether we need to switch to stable write or not.
+     * It checks if membuf is flushed or not and if it is not flushed then it
+     * we can overwrite the data in the membuf. If membuf is flushed then we
+     * need to switch to stable write.
+     */
+    bool need_stable_write(bool verify_stable_writes_required,
+                            const struct membuf *mb) const;
+
+    /**
      * Copy application data into the inode's file cache.
      *
      * bufv: fuse_bufvec containing application data, passed by fuse.
@@ -1134,6 +1253,7 @@ public:
      */
     int copy_to_cache(const struct fuse_bufvec* bufv,
                       off_t offset,
+                      bool verify_switch_to_stable_write,
                       uint64_t *extent_left,
                       uint64_t *extent_right);
 
@@ -1161,6 +1281,12 @@ public:
      * NFS server in a single write call.
      */
     void sync_membufs(std::vector<bytes_chunk> &bcs, bool is_flush);
+
+    /**
+     * Commit the flushed membufs in the file cache to the NFS server.
+     * Issue commit_rpc with offset=0, length=0 to commit all the unstable writes.
+     */
+    void commit_membufs();
 
     /**
      * Called when last open fd is closed for a file.
@@ -1299,6 +1425,23 @@ public:
     int get_write_error() const
     {
         return write_error;
+    }
+
+    /**
+     * Set the stable write flag.
+     */
+    void set_stable_write()
+    {
+        assert(!stable_write);
+        stable_write = true;
+    }
+
+    /**
+     * Check if the inode has stable write flag set.
+     */
+    bool is_stable_write() const
+    {
+        return stable_write;
     }
 
     /**

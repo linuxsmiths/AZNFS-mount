@@ -93,9 +93,11 @@ public:
          * RPCs.
          */
         assert(_optype != FUSE_RELEASE);
+        #if 0
         if (_optype == FUSE_FLUSH) {
             _optype = FUSE_WRITE;
         }
+        #endif
 
         optype = _optype;
         stamp.start = start_usec;
@@ -231,6 +233,7 @@ public:
                    optype == FUSE_READDIRPLUS ||
                    optype == FUSE_READ ||
                    optype == FUSE_WRITE ||
+                   optype == FUSE_FLUSH ||
                    optype == FUSE_GETATTR ||
                    optype == FUSE_LOOKUP ||
                    optype == FUSE_SETATTR);

@@ -31,6 +31,8 @@ nfs_inode::nfs_inode(const struct nfs_fh3 *filehandle,
     assert(client != nullptr);
     assert(client->magic == NFS_CLIENT_MAGIC);
     assert(write_error == 0);
+    assert(stable_write == false);
+    assert(commit_state == commit_not_running);
 
 #ifndef ENABLE_NON_AZURE_NFS
     // Blob NFS supports only these file types.
@@ -370,6 +372,22 @@ int nfs_inode::get_actimeo_max() const
     }
 }
 
+/**
+ * commit_membufs() is called by writer thread to commit flushed membufs.
+ */
+void nfs_inode::commit_membufs()
+{
+    /*
+     * Create the commit task to carry out the write.
+     */
+    struct rpc_task *commit_task =
+                get_client()->get_rpc_task_helper()->alloc_rpc_task(FUSE_FLUSH);
+    commit_task->init_flush(nullptr /* fuse_req */, ino);
+    assert(commit_task->rpc_api->pvt == nullptr);
+
+    commit_task->issue_commit_rpc();
+}
+
 void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
 {
     if (bc_vec.empty()) {
@@ -379,7 +397,7 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
     /*
      * Create the flush task to carry out the write.
      */
-    struct rpc_task *flush_task = nullptr;
+    struct rpc_task *write_task = nullptr;
 
     // Flush dirty membufs to backend.
     for (bytes_chunk &bc : bc_vec) {
@@ -452,46 +470,66 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
             continue;
         }
 
-        if (flush_task == nullptr) {
-            flush_task =
-                get_client()->get_rpc_task_helper()->alloc_rpc_task(FUSE_FLUSH);
-            flush_task->init_flush(nullptr /* fuse_req */, ino);
-            assert(flush_task->rpc_api->pvt == nullptr);
-            flush_task->rpc_api->pvt = new bc_iovec(this);
+        if (write_task == nullptr) {
+            write_task =
+                get_client()->get_rpc_task_helper()->alloc_rpc_task(FUSE_WRITE);
+            write_task->init_write(nullptr /* fuse_req */, ino, nullptr /* fuse_bufvec */,
+                         0 /* size */, 0 /* offset */);
+            assert(write_task->rpc_api->pvt == nullptr);
+            write_task->rpc_api->pvt = new bc_iovec(this);
         }
 
         /*
-         * Add as many bytes_chunk to the flush_task as it allows.
+         * Add as many bytes_chunk to the write_task as it allows.
          * Once packed completely, then dispatch the write.
          */
-        if (flush_task->add_bc(bc)) {
+        if (write_task->add_bc(bc)) {
             continue;
         } else {
             /*
-             * This flush_task will orchestrate this write.
+             * This write_task will orchestrate this write.
              */
-            flush_task->issue_write_rpc();
+            write_task->issue_write_rpc();
 
             /*
              * Create the new flush task to carry out the write for next bc,
-             * which we failed to add to the existing flush_task.
+             * which we failed to add to the existing write_task.
              */
-            flush_task =
-                get_client()->get_rpc_task_helper()->alloc_rpc_task(FUSE_FLUSH);
-            flush_task->init_flush(nullptr /* fuse_req */, ino);
-            assert(flush_task->rpc_api->pvt == nullptr);
-            flush_task->rpc_api->pvt = new bc_iovec(this);
+            write_task =
+                get_client()->get_rpc_task_helper()->alloc_rpc_task(FUSE_WRITE);
+            write_task->init_write(nullptr /* fuse_req */, ino, nullptr /* fuse_bufvec */,
+                         0 /* size */, 0 /* offset */);
+            assert(write_task->rpc_api->pvt == nullptr);
+            write_task->rpc_api->pvt = new bc_iovec(this);
 
             // Single bc addition should not fail.
-            [[maybe_unused]] bool res = flush_task->add_bc(bc);
+            [[maybe_unused]] bool res = write_task->add_bc(bc);
             assert(res == true);
         }
     }
 
     // Dispatch the leftover bytes (or full write).
-    if (flush_task) {
-        flush_task->issue_write_rpc();
+    if (write_task) {
+        write_task->issue_write_rpc();
     }
+}
+
+bool nfs_inode::need_stable_write(bool verify_stable_writes_required,
+                                  const struct membuf *mb) const
+{
+    if (!verify_stable_writes_required) {
+        return false;
+    }
+
+    /*
+     * Overwrite case, if the membuf is already in flushing/commit_pending state
+     * then we can't overwrite it, and need to switch to stable write.
+     */
+    if (mb->is_flushing() || mb->is_commit_pending() || mb->is_uptodate()) {
+        return true;
+    }
+
+    return false;
 }
 
 /**
@@ -499,6 +537,7 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
  */
 int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
                              off_t offset,
+                             bool verify_stable_writes_required,
                              uint64_t *extent_left,
                              uint64_t *extent_right)
 {
@@ -558,7 +597,7 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          * TODO: If we have copied at least one byte, do not fail but instead
          *       let the caller know that we copied ledd.
          */
-        if (err == EAGAIN) {
+        if (err == EAGAIN || err == EACCES) {
             mb->clear_inuse();
             assert(remaining >= bc.length);
             remaining -= bc.length;
@@ -576,11 +615,35 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          * membuf remains uptodate after the copy.
          */
 try_copy:
-        if (bc.maps_full_membuf() || mb->is_uptodate()) {
+        if (need_stable_write(verify_stable_writes_required, mb)) {
+            AZLogWarn("[{}] Switch to stable write, Overwrite of membuf [{}, {}]",
+                    ino,
+                    mb->offset,
+                    mb->offset+mb->length);
+            assert(err == 0);
+            err = EACCES;
+
+            mb->clear_inuse();
+            filecache_handle->release(mb->offset, mb->length);
+            mb->set_inuse();
+        } else if ((bc.maps_full_membuf() || mb->is_uptodate()) &&
+                  !(mb->is_flushing() || mb->is_commit_pending())) {
+
             assert(bc.length <= remaining);
             ::memcpy(bc.get_buffer(), buf, bc.length);
             mb->set_uptodate();
-            mb->set_dirty();
+
+            /*
+            * If the membuf was not dirty, mark it dirty.
+            * It may happen in case of random writes where overwrite
+            * to previous data is done. In such cases the membuf is
+            * already dirty we don't need to mark it dirty again as it
+            * cause dirty membuf accounting to go wrong.
+            */
+            if (!mb->is_dirty()) {
+                mb->set_dirty();
+            }
+
             // Update file size in inode'c cached attr.
             on_cached_write(bc.offset, bc.length);
         } else {
@@ -630,7 +693,8 @@ try_copy:
             inject_eagain = inject_error();
 #endif
 
-            if (mb->is_uptodate() && !inject_eagain) {
+            if (mb->is_uptodate() &&
+                !(mb->is_flushing() || mb->is_commit_pending() || inject_eagain)) {
                 AZLogWarn("[{}] Membuf [{}, {}) (bc [{}, {})) is now uptodate, "
                           "retrying copy", ino,
                           mb->offset, mb->offset+mb->length,

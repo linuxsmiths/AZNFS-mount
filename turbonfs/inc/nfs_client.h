@@ -527,6 +527,8 @@ public:
 
     void jukebox_read(struct api_task_info *rpc_api);
 
+    void jukebox_write(struct api_task_info *rpc_api);
+
     void jukebox_flush(struct api_task_info *rpc_api);
 
     /**

@@ -805,7 +805,7 @@ static void aznfsc_ll_write_buf(fuse_req_t req,
      */
     assert(bufv->count == 1);
 
-    AZLogDebug("aznfsc_ll_write_buf(req={}, ino={}, bufv={}, off={}, len={}, "
+    AZLogInfo("aznfsc_ll_write_buf(req={}, ino={}, bufv={}, off={}, len={}, "
                "fi={} [writepage: {}, flush: {}]",
                fmt::ptr(req), ino, fmt::ptr(bufv), off, length, fmt::ptr(fi),
                fi->writepage ? 1 : 0, fi->flush ? 1 : 0);
