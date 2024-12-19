@@ -1216,6 +1216,13 @@ bool nfs_client::silly_rename(
                    inode->get_fuse_ino(), inode->get_generation(),
                    inode->get_silly_rename_level());
 
+        /*
+         * Increment the opencnt for the inode being silly renamed.
+         * This extra count will be decremented in rename_callback by calling
+         * release().
+         */
+        inode->opencnt++;
+
         AZLogInfo("silly_rename: Renaming {}/{} -> {}, ino={}"
                   "rename_triggered_silly_rename={}",
                   parent_ino, name, newname, inode->get_fuse_ino(),

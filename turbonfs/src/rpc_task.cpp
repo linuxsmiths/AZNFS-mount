@@ -1603,7 +1603,7 @@ void rename_callback(
      *       unlink, which means we will not get any other call for this inode,
      *       so we can safely access the inode w/o lock.
      */
-    if (status == 0 && silly_rename) {
+    if (silly_rename) {
         const fuse_ino_t silly_rename_ino =
             task->rpc_api->rename_task.get_silly_rename_ino();
         assert(client->magic == NFS_CLIENT_MAGIC);
@@ -1614,29 +1614,37 @@ void rename_callback(
         // Silly rename has the same source and target dir.
         assert(parent_ino == newparent_ino);
 
-        silly_rename_inode->silly_renamed_name =
-            task->rpc_api->rename_task.get_newname();
-        silly_rename_inode->parent_ino =
-            task->rpc_api->rename_task.get_newparent_ino();
-        silly_rename_inode->is_silly_renamed = true;
-
         /*
-         * Successfully (silly)renamed, hold a ref on the parent directory
-         * inode so that it doesn't go away until we have deleted the
-         * silly-renamed file. This ref is dropped in unlink_callback().
+         * Drop the opencnt that was incremented when silly rename was
+         * triggered.
          */
-        parent_inode->incref();
+        silly_rename_inode->release(task->get_fuse_req());
 
-        AZLogInfo("[{}] Silly rename ({}) successfully completed! "
-                  "to-delete: {}/{}",
-                  silly_rename_ino,
-                  rename_triggered_silly_rename ? "rename" : "unlink",
-                  silly_rename_inode->parent_ino,
-                  silly_rename_inode->silly_renamed_name);
+        if (status == 0) {
+            silly_rename_inode->silly_renamed_name =
+                task->rpc_api->rename_task.get_newname();
+            silly_rename_inode->parent_ino =
+                task->rpc_api->rename_task.get_newparent_ino();
+            silly_rename_inode->is_silly_renamed = true;
 
-#ifdef ENABLE_PARANOID
-        assert(silly_rename_inode->silly_renamed_name.find(".nfs") == 0);
-#endif
+            /*
+            * Successfully (silly)renamed, hold a ref on the parent directory
+            * inode so that it doesn't go away until we have deleted the
+            * silly-renamed file. This ref is dropped in unlink_callback().
+            */
+            parent_inode->incref();
+
+            AZLogInfo("[{}] Silly rename ({}) successfully completed! "
+                    "to-delete: {}/{}",
+                    silly_rename_ino,
+                    rename_triggered_silly_rename ? "rename" : "unlink",
+                    silly_rename_inode->parent_ino,
+                    silly_rename_inode->silly_renamed_name);
+
+    #ifdef ENABLE_PARANOID
+            assert(silly_rename_inode->silly_renamed_name.find(".nfs") == 0);
+    #endif
+        }
     }
 
     if (NFS_STATUS(res) == NFS3ERR_JUKEBOX) {
