@@ -472,6 +472,17 @@ int main(int argc, char *argv[])
         ret = fuse_session_loop_mt(se, loop_config);
     }
 
+    while (rpc_stats_az::fuse_responses_awaited != 0) {
+        AZLogWarn("Waiting for all the requests to be responded. Pending "
+                  "requests: {}", rpc_stats_az::fuse_responses_awaited.load());
+
+        /*
+         * Wait for all the responses to be sent out before closing
+         * the transport.
+         * Sleep for 5ms.
+         */
+        ::usleep(5000);
+    }
     /*
      * We come here when user unmounts the fuse filesystem.
      */
