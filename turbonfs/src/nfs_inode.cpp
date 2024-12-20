@@ -32,6 +32,10 @@ nfs_inode::nfs_inode(const struct nfs_fh3 *filehandle,
     assert(client->magic == NFS_CLIENT_MAGIC);
     assert(write_error == 0);
 
+    // TODO: Revert this to false once commit changes integrated.
+    assert(stable_write == true);
+    assert(commit_state == commit_state_t::COMMIT_NOT_NEEDED);
+
 #ifndef ENABLE_NON_AZURE_NFS
     // Blob NFS supports only these file types.
     assert((file_type == S_IFREG) ||
@@ -577,10 +581,12 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          */
 try_copy:
         if (bc.maps_full_membuf() || mb->is_uptodate()) {
+
             assert(bc.length <= remaining);
             ::memcpy(bc.get_buffer(), buf, bc.length);
             mb->set_uptodate();
             mb->set_dirty();
+
             // Update file size in inode'c cached attr.
             on_cached_write(bc.offset, bc.length);
         } else {

@@ -255,6 +255,16 @@ private:
      */
     struct stat attr;
 
+    /*
+     * In start we set the stable_write flag to false as write pattern is unknown.
+     * stable_write flag is set to true in case of new write is not append to a file.
+     * Once set to true, it will remain true for the life of the inode.
+     * 
+     * Note: As of now, we are not using this flag as commit changes not yet integrated.
+     *       So, we are setting this flag to true.
+     */
+    bool stable_write = true;
+
 public:
     /*
      * Fuse inode number.
@@ -336,6 +346,34 @@ public:
      * This is either 0 (no error) or a +ve errno value.
      */
     int write_error = 0;
+
+    /*
+     * Commit state for this inode.
+     * This is used to track the state of commit operation for this inode, which can be one of:
+     * COMMIT_NOT_NEEDED:  No or not enough uncommitted (written using unstable writes) data.
+     *                     Note that we want to commit multiple blocks at a time to amortize the latency
+     *                     introduced by commit, given the fact that all writes have to stop till the commit
+     *                     completes.
+     * NEEDS_COMMIT:       There's enough uncommitted data that needs to be committed.
+     *                     This indicates running write(flush) task to start commit task when flushing completes
+     *                     (bytes_flushing == 0).
+     * COMMIT_IN_PROGRESS: There's an outstanding commit operation.
+     *                     Till it completes no write or commit for this inode can be sent to the server.
+     *
+     * Valid state transitions:
+     * COMMIT_NOT_NEEDED -> NEEDS_COMMIT -> COMMIT_IN_PROGRESS
+     * COMMIT_NOT_NEEDED -> COMMIT_IN_PROGRESS
+     * COMMIT_IN_PROGRESS -> COMMIT_NOT_NEEDED
+     */
+    enum class commit_state_t
+    {
+        INVALID = 0,
+        COMMIT_NOT_NEEDED,
+        NEEDS_COMMIT,
+        COMMIT_IN_PROGRESS,
+    };
+
+    commit_state_t commit_state = commit_state_t::COMMIT_NOT_NEEDED;
 
     /**
      * TODO: Initialize attr with postop attributes received in the RPC
@@ -847,6 +885,23 @@ public:
         }
     }
 
+    /*
+     * This function checks, whether new io is overlapping/sparse write with the existing data
+     * in the file or not.
+     * For overlapping/sparse write, we need to switch to stable write.
+     */
+    bool check_stable_write_required(off_t offset) const
+    {
+        if (offset != attr.st_size) {
+            AZLogDebug("offset:{} is either overlapping/sparse_write with the existing data in the"
+             "file with end_offset: {}", offset, attr.st_size);
+
+            return true;
+        }
+
+        return false;
+    }
+
     /**
      * Check if [offset, offset+length) lies within the current RA window.
      * bytes_chunk_cache would call this to find out if a particular membuf
@@ -994,6 +1049,56 @@ public:
      }
 
     /**
+     * Is commit pending for this inode?
+     */
+    bool is_commit_pending()
+    {
+        assert(commit_state != commit_state_t::INVALID);
+        return (commit_state == commit_state_t::NEEDS_COMMIT);
+    }
+
+    /**
+     * Set commit_in_progress state for this inode under the lock.
+     */
+    void set_commit_in_progress()
+    {
+        assert(commit_state != commit_state_t::INVALID);
+        assert(commit_state != commit_state_t::COMMIT_IN_PROGRESS);
+        commit_state = commit_state_t::COMMIT_IN_PROGRESS;
+    }
+
+    /**
+     * Set commit_in_pending state for this inode.
+     * Note this is set to let flushing task know that commit is pending and start commit task.
+     */
+    void set_commit_in_pending()
+    {
+        // Commit can be set to pending only if it is in commit_not_needed state.
+        assert(commit_state == commit_state_t::COMMIT_NOT_NEEDED);
+        commit_state = commit_state_t::NEEDS_COMMIT;
+    }
+
+    /**
+     * Clear commit_in_progress state for this inode.
+     */
+    void clear_commit_in_progress()
+    {
+        assert(commit_state != commit_state_t::INVALID);
+        assert(commit_state == commit_state_t::COMMIT_IN_PROGRESS);
+
+        commit_state = commit_state_t::COMMIT_NOT_NEEDED;
+    }
+
+    /**
+     * Is commit in progress for this inode?
+     */
+    bool is_commit_progress() const
+    {
+        assert(commit_state != commit_state_t::INVALID);
+        return (commit_state == commit_state_t::COMMIT_IN_PROGRESS);
+    }
+
+    /**
      * Increment lookupcnt of the inode.
      */
     void incref() const
@@ -1109,7 +1214,7 @@ public:
         return (attr_timeout_secs != -1) ? attr_timeout_secs.load()
                                          : get_actimeo_min();
     }
-
+    
     /**
      * Copy application data into the inode's file cache.
      *
@@ -1299,6 +1404,23 @@ public:
     int get_write_error() const
     {
         return write_error;
+    }
+
+    /**
+     * Set the stable write flag.
+     */
+    void set_stable_write()
+    {
+        assert(!stable_write);
+        stable_write = true;
+    }
+
+    /**
+     * Check if the inode has stable write flag set.
+     */
+    bool is_stable_write() const
+    {
+        return stable_write;
     }
 
     /**
