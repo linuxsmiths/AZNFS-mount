@@ -61,6 +61,8 @@ jobs:
       shell: bash
       run: |
         sudo apt-get update
+        sudo apt update
+        sudo apt upgrade
         sudo apt install -y gcc-aarch64-linux-gnu build-essential
     - name: Checkout repository
       uses: actions/checkout@v3
