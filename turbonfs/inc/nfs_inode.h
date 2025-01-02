@@ -110,6 +110,7 @@ struct nfs_inode
      */
     mutable std::shared_mutex ilock_1;
 
+    mutable std::shared_mutex flush_lock;
     /*
      * S_IFREG, S_IFDIR, etc.
      * 0 is not a valid file type.
@@ -254,6 +255,8 @@ private:
      *       get_attr_nolock().
      */
     struct stat attr;
+
+    off_t cached_filesize = 0;
 
     /*
      * In start we set the stable_write flag to false as write pattern is unknown.
@@ -826,12 +829,13 @@ public:
          *     ilock_1 in the read fastpath.
          */
         assert((size_t) attr.st_size <= AZNFSC_MAX_FILE_SIZE);
+        assert((size_t) cached_filesize <= AZNFSC_MAX_FILE_SIZE);
 
         if (dont_check_expiry) {
-            return attr.st_size;
+            return cached_filesize;
         }
 
-        return attr_cache_expired() ? -1 : attr.st_size;
+        return attr_cache_expired() ? -1 : cached_filesize;
     }
 
     /**
@@ -851,16 +855,17 @@ public:
         const off_t new_size = offset + length;
 
         std::unique_lock<std::shared_mutex> lock(ilock_1);
-        if (new_size > attr.st_size) {
-            attr.st_size = new_size;
+        if (new_size > cached_filesize) {
+            cached_filesize = new_size;
         }
     }
 
     /*
      * This function checks, whether switch to stable write or not.
      */
-    bool check_stable_write_required(off_t offset) const
+    bool check_stable_write_required(off_t offset)
     {
+        AZLogInfo("Checking for stable write, offset:{}, stable_write {}", offset, stable_write ? "true" : "false");
         /*
          * If stable_write is already set, we don't need to do anything.
          * We don't need lock here as once stable_write is set it's never
@@ -877,9 +882,10 @@ public:
          * Similarly, if the offset is more than end of the file, we need to write zero block
          * in between the current end of the file and the offset.
          */
-        if (offset < attr.st_size) {
+        if (offset != attr.st_size) {
             AZLogInfo("Stable write required as offset:{} is not at the end of the file:{}", offset, attr.st_size);
 
+            stable_write = true;
             return true;
         }
 
@@ -1078,6 +1084,7 @@ public:
     {
         assert(commit_state < invalid_state);
         assert(commit_state == commit_in_progress);
+        AZLogInfo("Commit completed for inode:{}", ino);
         commit_state = commit_not_running;
     }
 
@@ -1240,7 +1247,6 @@ public:
      */
     int copy_to_cache(const struct fuse_bufvec* bufv,
                       off_t offset,
-                      bool verify_switch_to_stable_write,
                       uint64_t *extent_left,
                       uint64_t *extent_right);
 
@@ -1260,7 +1266,8 @@ public:
      *       queries the dirty membufs list, are not flushed.
      */
     int flush_cache_and_wait(uint64_t start_off = 0,
-                             uint64_t end_off = UINT64_MAX);
+                             uint64_t end_off = UINT64_MAX,
+                             bool is_flush = true);
 
     /**
      * Sync the dirty membufs in the file cache to the NFS server.

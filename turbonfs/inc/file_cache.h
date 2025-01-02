@@ -646,7 +646,8 @@ public:
     bool safe_to_release() const
     {
         const struct membuf *mb = get_membuf();
-        return !mb->is_inuse() && !mb->is_dirty() && !mb->is_commit_pending();
+        const bool safe = !mb->is_inuse() && !mb->is_dirty() && !mb->is_commit_pending();
+        return safe;
     }
 
     /**
@@ -1032,6 +1033,8 @@ public:
      * clear_inuse().
      */
     std::vector<bytes_chunk> get_dirty_bc_range(uint64_t st_off, uint64_t end_off) const;
+    std::vector<bytes_chunk> get_flushing_bc_range(uint64_t st_off, uint64_t end_off) const;
+    std::vector<bytes_chunk> get_dirty_bc_contigious_range(uint64_t& size);
     std::vector<bytes_chunk> get_commit_pending_bc_range() const;
 
     /**
@@ -1161,7 +1164,28 @@ public:
      */
     bool is_flushing_in_progress() const
     {
+        // AZLogInfo("bytes_flushing: {}", bytes_flushing);
         return bytes_flushing > 0;
+    }
+
+    uint64_t get_prune_bytes() const
+    {
+        static const uint64_t max_dirty_allowed_per_cache =
+            max_dirty_extent_bytes() * 2;
+        const bool local_pressure = std::max(int64_t(bytes_dirty - bytes_flushing), int64_t(0)) > (int64_t)max_dirty_allowed_per_cache;
+
+        if (local_pressure) {
+            return max_dirty_extent_bytes();
+        }
+
+        /*
+         * Global pressure is when get_prune_goals() returns non-zero bytes
+         * to be pruned inline.
+         */
+        uint64_t inline_bytes;
+
+        get_prune_goals(&inline_bytes, nullptr);
+        return inline_bytes > bytes_flushing ? inline_bytes - bytes_flushing : 0;
     }
 
     /**
@@ -1178,11 +1202,13 @@ public:
          */
         static const uint64_t max_dirty_allowed_per_cache =
             max_dirty_extent_bytes() * 2;
-        const bool local_pressure = bytes_dirty > max_dirty_allowed_per_cache;
+        const bool local_pressure = (bytes_dirty + bytes_commit_pending) > max_dirty_allowed_per_cache;
 
         if (local_pressure) {
             return true;
         }
+
+        return false;
 
         /*
          * Global pressure is when get_prune_goals() returns non-zero bytes

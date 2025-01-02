@@ -394,6 +394,9 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
         return;
     }
 
+    auto bc = bc_vec.begin();
+    check_stable_write_required(bc->offset);
+
     /*
      * Create the flush task to carry out the write.
      */
@@ -512,6 +515,12 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
     if (write_task) {
         write_task->issue_write_rpc();
     }
+
+    std::unique_lock<std::shared_mutex> lock(ilock_1);
+    if (!stable_write && get_filecache()->is_flushing_in_progress()) {
+        AZLogInfo("sync_membufs(): setting commit_in_pending");
+        set_commit_in_pending();
+    }
 }
 
 bool nfs_inode::need_stable_write(bool verify_stable_writes_required,
@@ -537,7 +546,6 @@ bool nfs_inode::need_stable_write(bool verify_stable_writes_required,
  */
 int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
                              off_t offset,
-                             bool verify_stable_writes_required,
                              uint64_t *extent_left,
                              uint64_t *extent_right)
 {
@@ -597,7 +605,7 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          * TODO: If we have copied at least one byte, do not fail but instead
          *       let the caller know that we copied ledd.
          */
-        if (err == EAGAIN || err == EACCES) {
+        if (err == EAGAIN) {
             mb->clear_inuse();
             assert(remaining >= bc.length);
             remaining -= bc.length;
@@ -615,19 +623,7 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          * membuf remains uptodate after the copy.
          */
 try_copy:
-        if (need_stable_write(verify_stable_writes_required, mb)) {
-            AZLogWarn("[{}] Switch to stable write, Overwrite of membuf [{}, {}]",
-                    ino,
-                    mb->offset,
-                    mb->offset+mb->length);
-            assert(err == 0);
-            err = EACCES;
-
-            mb->clear_inuse();
-            filecache_handle->release(mb->offset, mb->length);
-            mb->set_inuse();
-        } else if ((bc.maps_full_membuf() || mb->is_uptodate()) &&
-                  !(mb->is_flushing() || mb->is_commit_pending())) {
+        if ((bc.maps_full_membuf() || mb->is_uptodate())) {
 
             assert(bc.length <= remaining);
             ::memcpy(bc.get_buffer(), buf, bc.length);
@@ -693,8 +689,7 @@ try_copy:
             inject_eagain = inject_error();
 #endif
 
-            if (mb->is_uptodate() &&
-                !(mb->is_flushing() || mb->is_commit_pending() || inject_eagain)) {
+            if (mb->is_uptodate() && !inject_eagain) {
                 AZLogWarn("[{}] Membuf [{}, {}) (bc [{}, {})) is now uptodate, "
                           "retrying copy", ino,
                           mb->offset, mb->offset+mb->length,
@@ -743,8 +738,12 @@ try_copy:
 /**
  * Note: This takes shared lock on ilock_1.
  */
-int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
+int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off, bool is_flush)
 {
+    std::vector<bytes_chunk> bc_vec;
+    uint64_t size = 0;
+    bool wait_for_flush_to_complete = false;
+
     /*
      * MUST be called only for regular files.
      * Leave the assert to catch if fuse ever calls flush() on non-reg files.
@@ -773,20 +772,52 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
         return 0;
     }
 
-    /*
-     * Get the dirty bytes_chunk from the filecache handle.
-     * This will grab an exclusive lock on the file cache and return the list
-     * of dirty bytes_chunks at that point. Note that we can have new dirty
-     * bytes_chunks created but we don't want to wait for those.
-     */
-    std::vector<bytes_chunk> bc_vec =
-        filecache_handle->get_dirty_bc_range(start_off, end_off);
+    if (is_flush) {
+        /*
+        * Get the dirty bytes_chunk from the filecache handle.
+        * This will grab an exclusive lock on the file cache and return the list
+        * of dirty bytes_chunks at that point. Note that we can have new dirty
+        * bytes_chunks created but we don't want to wait for those.
+        */
+        bc_vec = filecache_handle->get_dirty_bc_range(start_off, end_off);
+        if (!bc_vec.empty()) {
+            AZLogInfo("SWITCHING TO STABLE WRITE");
+            stable_write = true;
+        }
+    } else {
+        uint64_t prune_bytes = get_filecache()->get_prune_bytes();
+        if (prune_bytes > 0) {
+            bc_vec = filecache_handle->get_dirty_bc_contigious_range(size);
+            
+            if (prune_bytes > size) {
+                AZLogInfo("[{}] Prune bytes: {} > size: {}", ino, prune_bytes, size);
+                AZLogInfo("SWITCHING TO STABLE WRITE");
+                for (auto& bc : bc_vec) {
+                    bc.get_membuf()->clear_inuse();
+                }
+                /*
+                 * Get all the dirty bytes_chunk from the filecache handle.
+                 */
+                bc_vec = filecache_handle->get_dirty_bc_range(start_off, end_off);
+                stable_write = true;
+            } else {
+                AZLogInfo("[{}] Prune bytes: {} <= size: {}", ino, prune_bytes, size);
+                AZLogInfo("Flush the contigious dirty membufs");
+            }
+        } else {
+            AZLogInfo("[{}] Prune bytes: {} <= size: {}", ino, prune_bytes, size);
+            wait_for_flush_to_complete = true;
+            bc_vec = filecache_handle->get_flushing_bc_range(start_off, end_off);
+        }
+    }
 
     /*
      * sync_membufs() iterate over the bc_vec and start flushing the dirty membufs.
      * It batches the contigious dirty membufs and issues a single write RPC for them.
      */
-    sync_membufs(bc_vec, true);
+    if (wait_for_flush_to_complete == false) {
+        sync_membufs(bc_vec, true);
+    }
 
     /*
      * Our caller expects us to return only after the flush completes.
