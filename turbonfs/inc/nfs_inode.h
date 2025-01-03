@@ -111,6 +111,24 @@ struct nfs_inode
     mutable std::shared_mutex ilock_1;
 
     /*
+     * Inode flush lock.
+     * This is used for synchronizing changes to backend file size as a result
+     * of flush/commit and application initiated truncate calls forcing a
+     * specific file size. Note that ilock_1 is for synchronizing the
+     * application visible state of the inode (attr cache, etc), while
+     * iflush_lock_3 synchronizes changes to the on-disk file (through flush,
+     * commit and truncate).
+     * Any flush done to an inode will mark all the to-be-flushed membufs as
+     * flushing while holding this lock and any truncate call will hold this
+     * lock to ensure no new flush/commit operations are started while it
+     * updates the file size using SETATTR RPC.
+     *
+     * Note: Though it's called flush lock, but it protects backend file size
+     *       changes through both flush and/or commit.
+     */
+    mutable std::shared_mutex iflush_lock_3;
+
+    /*
      * S_IFREG, S_IFDIR, etc.
      * 0 is not a valid file type.
      */
@@ -264,6 +282,18 @@ private:
      */
     bool non_append_writes_seen = false;
 
+    /*
+     * In start we set the stable_write flag to false as write pattern is unknown.
+     * At the time of flushing cached writes to Blob we check if the cached write
+     * causes the append write on the Blob. Append write can be send as unstable write,
+     * while non-append write goes as a stable write.
+     * Once set to true, it will remain true for the life of the inode.
+     * 
+     * Note: As of now, we are not using this flag as commit changes not yet integrated.
+     *       So, we are setting this flag to true.
+     */
+    bool stable_write = true;
+
 public:
     /*
      * Fuse inode number.
@@ -345,6 +375,34 @@ public:
      * This is either 0 (no error) or a +ve errno value.
      */
     int write_error = 0;
+
+    /*
+     * Commit state for this inode.
+     * This is used to track the state of commit operation for this inode, which can be one of:
+     * COMMIT_NOT_NEEDED:  No or not enough uncommitted (written using unstable writes) data.
+     *                     Note that we want to commit multiple blocks at a time to amortize the latency
+     *                     introduced by commit, given the fact that all writes have to stop till the commit
+     *                     completes.
+     * NEEDS_COMMIT:       There's enough uncommitted data that needs to be committed.
+     *                     This indicates running write(flush) task to start commit task when flushing completes
+     *                     (bytes_flushing == 0).
+     * COMMIT_IN_PROGRESS: There's an outstanding commit operation.
+     *                     Till it completes no write or commit for this inode can be sent to the server.
+     *
+     * Valid state transitions:
+     * COMMIT_NOT_NEEDED -> NEEDS_COMMIT -> COMMIT_IN_PROGRESS
+     * COMMIT_NOT_NEEDED -> COMMIT_IN_PROGRESS
+     * COMMIT_IN_PROGRESS -> COMMIT_NOT_NEEDED
+     */
+    enum class commit_state_t
+    {
+        INVALID = 0,
+        COMMIT_NOT_NEEDED,
+        NEEDS_COMMIT,
+        COMMIT_IN_PROGRESS,
+    };
+
+    std::atomic<commit_state_t> commit_state = commit_state_t::COMMIT_NOT_NEEDED;
 
     /**
      * TODO: Initialize attr with postop attributes received in the RPC
@@ -435,6 +493,22 @@ public:
             filecache_alloced = true;
         }
     }
+
+    /**
+     * We split the truncate operation in two separate apis truncate_start()
+     * and truncate_end(). truncate_start() must be called before issuing the
+     * SETATTR RPC and truncate_end() must be called from SETATTR callback.
+     * truncate_start() grabs the exclusive iflush_lock_3 lock to ensure no
+     * new flush/commit operations can be issued for this inode, and waits for
+     * any ongoing flush/commit operations to complete, before truncating the
+     * filecache to the new size.
+     * truncate_end() simply releases the iflush_lock_3 lock held by
+     * truncate_start().
+     * This two apis together ensure that any flush/commit operation cannot
+     * change the file size after truncate sets it.
+     */
+    bool truncate_start(size_t size);
+    void truncate_end();
 
     /**
      * This MUST be called only after has_filecache() returns true, else
@@ -870,6 +944,24 @@ public:
         }
     }
 
+    /*
+     * offset is start offset of contigious cached write request which needs to be flushed
+     * to the Blob. This function checks, whether given offset is append to the end of the file
+     * or not. If offset is not append to the end of the file, we need to switch to stable write.
+     * For overlapping/sparse write, we need to send stable writes.
+     */
+    bool check_stable_write_required(off_t offset) const
+    {
+        if (offset != attr.st_size) {
+            AZLogDebug("offset:{} is either overlapping/sparse_write with the existing data in the"
+             "file with end_offset: {}", offset, attr.st_size);
+
+            return true;
+        }
+
+        return false;
+    }
+
     /**
      * Check if [offset, offset+length) lies within the current RA window.
      * bytes_chunk_cache would call this to find out if a particular membuf
@@ -1017,6 +1109,54 @@ public:
      }
 
     /**
+     * Is commit pending for this inode?
+     */
+    bool is_commit_pending() const
+    {
+        assert(commit_state != commit_state_t::INVALID);
+        return (commit_state == commit_state_t::NEEDS_COMMIT);
+    }
+
+    /**
+     * set needs_commit state for this inode.
+     * Note this is set to let flushing task know that commit is pending and start commit task.
+     */
+    void set_commit_pending()
+    {
+        // Commit can be set to pending only if it is in commit_not_needed state.
+        assert(commit_state == commit_state_t::COMMIT_NOT_NEEDED);
+        commit_state = commit_state_t::NEEDS_COMMIT;
+    }
+
+    /**
+     * Is commit in progress for this inode?
+     */
+    bool is_commit_in_progress() const
+    {
+        assert(commit_state != commit_state_t::INVALID);
+        return (commit_state == commit_state_t::COMMIT_IN_PROGRESS);
+    }
+
+    /**
+     * Set commit_in_progress state for this inode.
+     */
+    void set_commit_in_progress()
+    {
+        assert(commit_state != commit_state_t::INVALID);
+        assert(commit_state != commit_state_t::COMMIT_IN_PROGRESS);
+        commit_state = commit_state_t::COMMIT_IN_PROGRESS;
+    }
+
+    /**
+     * Clear commit_in_progress state for this inode.
+     */
+    void clear_commit_in_progress()
+    {
+        assert(commit_state == commit_state_t::COMMIT_IN_PROGRESS);
+        commit_state = commit_state_t::COMMIT_NOT_NEEDED;
+    }
+
+    /**
      * Increment lookupcnt of the inode.
      */
     void incref() const
@@ -1132,7 +1272,7 @@ public:
         return (attr_timeout_secs != -1) ? attr_timeout_secs.load()
                                          : get_actimeo_min();
     }
-
+    
     /**
      * Copy application data into the inode's file cache.
      *
@@ -1174,8 +1314,20 @@ public:
      *       filecache_handle lock and get the list of dirty membufs at this
      *       instant and flush those. Any new dirty membufs added after it
      *       queries the dirty membufs list, are not flushed.
+     *
+     * Note: This take the inode iflush_lock_3 lock to ensure that it doesn't initiate
+     *       new flush operation while some truncate call is in progress (which must have
+     *       taken the iflush_lock_3).
      */
     int flush_cache_and_wait(uint64_t start_off = 0,
+                             uint64_t end_off = UINT64_MAX);
+
+    /**
+     * Wait for currently flushing membufs to complete.
+     * Note : Caller must hold the inode iflush_lock_3 to ensure that
+     *        no new membufs are added till this call completes.
+     */
+    int wait_for_ongoing_flush(uint64_t start_off = 0,
                              uint64_t end_off = UINT64_MAX);
 
     /**
@@ -1322,6 +1474,23 @@ public:
     int get_write_error() const
     {
         return write_error;
+    }
+
+    /**
+     * Set the stable write flag.
+     */
+    void set_stable_write()
+    {
+        assert(!stable_write);
+        stable_write = true;
+    }
+
+    /**
+     * Check if the inode has stable write flag set.
+     */
+    bool is_stable_write() const
+    {
+        return stable_write;
     }
 
     /**

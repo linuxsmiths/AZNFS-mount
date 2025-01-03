@@ -32,6 +32,10 @@ nfs_inode::nfs_inode(const struct nfs_fh3 *filehandle,
     assert(client->magic == NFS_CLIENT_MAGIC);
     assert(write_error == 0);
 
+    // TODO: Revert this to false once commit changes integrated.
+    assert(stable_write == true);
+    assert(commit_state == commit_state_t::COMMIT_NOT_NEEDED);
+
 #ifndef ENABLE_NON_AZURE_NFS
     // Blob NFS supports only these file types.
     assert((file_type == S_IFREG) ||
@@ -577,10 +581,12 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          */
 try_copy:
         if (bc.maps_full_membuf() || mb->is_uptodate()) {
+
             assert(bc.length <= remaining);
             ::memcpy(bc.get_buffer(), buf, bc.length);
             mb->set_uptodate();
             mb->set_dirty();
+
             // Update file size in inode'c cached attr.
             on_cached_write(bc.offset, bc.length);
         } else {
@@ -677,6 +683,88 @@ try_copy:
 }
 
 /**
+ * Note: Caller should call with iflush_lock_3 held.
+ */
+int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
+{
+    assert(start_off < end_off);
+    assert(end_off <= AZNFSC_MAX_CHUNK_SIZE);
+
+    /*
+     * MUST be called only for regular files.
+     * Leave the assert to catch if fuse ever calls flush() on non-reg files.
+     */
+    if (!is_regfile()) {
+        assert(0);
+        return 0;
+    }
+
+    /*
+     * If flush() is called w/o open(), there won't be any cache, skip.
+     */
+    if (!has_filecache()) {
+        return 0;
+    }
+
+    if (!get_filecache()->is_flushing_in_progress()) {
+        return 0;
+    }
+
+    /*
+     * Get the flushing bytes_chunk from the filecache handle.
+     * This will grab an exclusive lock on the file cache and return the list
+     * of flushing bytes_chunks at that point. Note that we can have new dirty
+     * bytes_chunks created but we don't want to wait for those.
+     */
+    std::vector<bytes_chunk> bc_vec =
+        filecache_handle->get_flushing_bc_range(start_off, end_off);
+
+    /*
+     * Our caller expects us to return only after the flush completes.
+     * Wait for all the membufs to flush and get result back.
+     */
+    for (bytes_chunk &bc : bc_vec) {
+        struct membuf *mb = bc.get_membuf();
+
+        assert(mb != nullptr);
+        assert(mb->is_inuse());
+        mb->set_locked();
+
+        /*
+         * If still dirty after we get the lock, it may mean two things:
+         * - Write failed.
+         * - Some other thread got the lock before us and it made the
+         *   membuf dirty again.
+         */
+        if (mb->is_dirty() && get_write_error()) {
+            AZLogError("[{}] Flush [{}, {}) failed with error: {}",
+                       ino,
+                       bc.offset, bc.offset + bc.length,
+                       get_write_error());
+        }
+
+        mb->clear_locked();
+        mb->clear_inuse();
+
+        /*
+         * Release the bytes_chunk back to the filecache.
+         * These bytes_chunks are not needed anymore as the flush is done.
+         *
+         * Note: We come here for bytes_chunks which were found dirty by the
+         *       above loop. These writes may or may not have been issued by
+         *       us (if not issued by us it was because some other thread,
+         *       mostly the writer issued the write so we found it flushing
+         *       and hence didn't issue). In any case since we have an inuse
+         *       count, release() called from write_callback() would not have
+         *       released it, so we need to release it now.
+         */
+        filecache_handle->release(bc.offset, bc.length);
+    }
+
+    return get_write_error();
+}
+
+/**
  * Note: This takes shared lock on ilock_1.
  */
 int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
@@ -708,6 +796,13 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
     if (!has_filecache()) {
         return 0;
     }
+
+    /*
+     * This take the inode iflush_lock_3 lock to ensure that it doesn't initiate
+     * new flush operation while some truncate call is in progress (which must have
+     * taken the iflush_lock_3).
+     */
+    std::unique_lock<std::shared_mutex> lock(iflush_lock_3);
 
     /*
      * Get the dirty bytes_chunk from the filecache handle.
@@ -767,6 +862,42 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
     }
 
     return get_write_error();
+}
+
+void nfs_inode::truncate_end()
+{
+    /*
+     * Caller must call truncate_end() for regular files only.
+     */
+    assert(has_filecache());
+
+    iflush_lock_3.unlock();
+}
+
+/*
+ * Note: This takes exclusive lock on iflush_lock_3.
+ */
+bool nfs_inode::truncate_start(size_t size)
+{
+    /*
+     * Caller must call truncate_start() for regular files only.
+     */
+    assert(has_filecache());
+    assert(size <= AZNFSC_MAX_FILE_SIZE);
+
+    /*
+     * Grab exclusive lock on iflush_lock_3, so that no new flush or commit
+     * can be issued till truncate() completes. There could be ongoing flush
+     * or commit operations in progress, we need to wait for them to complete.
+     */
+    iflush_lock_3.lock();
+    wait_for_ongoing_flush(0, UINT64_MAX);
+
+    /*
+     * Now there are no ongoing flush or commit operations in progress.
+     * we can safely truncate the filecache.
+     */
+    return filecache_handle->truncate(size);
 }
 
 bool nfs_inode::release(fuse_req_t req)
