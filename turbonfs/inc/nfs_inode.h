@@ -1274,7 +1274,7 @@ public:
      * All contiguous dirty membufs are clubbed together and sent to the
      * NFS server in a single write call.
      */
-    void sync_membufs(std::vector<bytes_chunk> &bcs, bool is_flush);
+    void sync_membufs(std::vector<bytes_chunk> &bcs, bool is_flush, bool do_inline_commit);
 
     /**
      * Commit the flushed membufs in the file cache to the NFS server.

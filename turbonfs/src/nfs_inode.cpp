@@ -388,7 +388,7 @@ void nfs_inode::commit_membufs()
     commit_task->issue_commit_rpc();
 }
 
-void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
+void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush, bool do_inline_commit)
 {
     if (bc_vec.empty()) {
         return;
@@ -516,8 +516,12 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
         write_task->issue_write_rpc();
     }
 
+    /*
+     * If we are not doing inline commit, and if the filecache is flushing
+     * in progress, set commit_in_pending flag.
+     */
     std::unique_lock<std::shared_mutex> lock(ilock_1);
-    if (!stable_write && get_filecache()->is_flushing_in_progress()) {
+    if (do_inline_commit && !stable_write && get_filecache()->is_flushing_in_progress()) {
         AZLogInfo("sync_membufs(): setting commit_in_pending");
         set_commit_in_pending();
     }
@@ -816,7 +820,7 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off, bool i
      * It batches the contigious dirty membufs and issues a single write RPC for them.
      */
     if (wait_for_flush_to_complete == false) {
-        sync_membufs(bc_vec, true);
+        sync_membufs(bc_vec, true, true /* do_inline_commit */);
     }
 
     /*

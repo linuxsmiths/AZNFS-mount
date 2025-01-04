@@ -2357,7 +2357,7 @@ void rpc_task::run_write()
         * Pass is_flush as false, since we don't want the writes to complete
         * before returning.
         */
-        inode->sync_membufs(bc_vec, false /* is_flush */);
+        inode->sync_membufs(bc_vec, false /* is_flush */, true /* do_inline_commit */);
     }
 
     // Send reply to original request without waiting for the backend write to complete.
