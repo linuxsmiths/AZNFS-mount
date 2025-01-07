@@ -553,20 +553,6 @@ void rpc_task::init_rename(fuse_req *request,
     rpc_api->rename_task.set_oldname(old_name);
     rpc_api->rename_task.clear_ino_found();
 
-    if (!silly_rename)
-    {
-        /*
-         * If this is a client initiated rename, set the inode that will
-         * be marked deleted once the rename completes.
-         * This will be the inode of the destination if it exists.
-         */
-        struct nfs_inode *parent_inode = get_client()->get_nfs_inode_from_ino(newparent_ino);
-        struct nfs_inode *inode = parent_inode->lookup(newname);
-        if (inode) {
-            rpc_api->rename_task.set_ino_to_be_deleted(inode->get_fuse_ino());
-        }
-    }
-
     /*
      * In case of cross-dir rename, we have to choose between
      * old and new dir to have the updated cache. We prefer
@@ -1800,6 +1786,9 @@ void rename_callback(
                 struct rpc_task *rename_tsk =
                     task->get_client()->get_rpc_task_helper()->alloc_rpc_task_reserved(FUSE_RENAME);
 
+                /*
+                 * TODO: Mark the renamed node as deleted.
+                 */
                 rename_tsk->init_rename(
                     task->rpc_api->req,
                     task->rpc_api->rename_task.get_oldparent_ino(),

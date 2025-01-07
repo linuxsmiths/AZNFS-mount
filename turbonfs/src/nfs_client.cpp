@@ -1360,6 +1360,20 @@ void nfs_client::rename(
 
     tsk->init_rename(req, parent_ino, name, newparent_ino, new_name,
                      silly_rename, silly_rename_ino, oldparent_ino, old_name);
+
+    if (!silly_rename)
+    {
+        /*
+         * If this is a client initiated rename, set the inode that will
+         * be marked deleted once the rename completes.
+         * This will be the inode of the destination if it exists.
+         */
+        struct nfs_inode *inode = newparent_inode->lookup(new_name);
+        if (inode) {
+            tsk->rpc_api->rename_task.set_ino_to_be_deleted(inode->get_fuse_ino());
+        }
+    }
+
     tsk->run_rename();
 }
 
