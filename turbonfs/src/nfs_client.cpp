@@ -1274,8 +1274,11 @@ void nfs_client::unlink(
     bool for_silly_rename)
 {
     struct rpc_task *tsk = rpc_task_helper->alloc_rpc_task(FUSE_UNLINK);
+    struct nfs_inode *parent_inode = get_nfs_inode_from_ino(parent_ino);
+    struct nfs_inode *inode = parent_inode->lookup(name);
 
-    tsk->init_unlink(req, parent_ino, name, for_silly_rename);
+    tsk->init_unlink(req, parent_ino, name, inode->get_fuse_ino(),
+                     for_silly_rename);
     tsk->run_unlink();
 }
 
@@ -1297,7 +1300,7 @@ void nfs_client::rmdir(
         inode->invalidate_attribute_cache();
     }
 
-    tsk->init_rmdir(req, parent_ino, name);
+    tsk->init_rmdir(req, parent_ino, name, inode->get_fuse_ino());
     tsk->run_rmdir();
 }
 

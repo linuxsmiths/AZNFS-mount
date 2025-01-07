@@ -330,6 +330,12 @@ static void aznfsc_ll_open(fuse_req_t req,
     assert(!inode->is_dir());
 
     /*
+     * Fuse should not call open() for deleted inode.
+     * The inode will still be valid till a forget call is made.
+     */
+    assert(!inode->is_deleted);
+
+    /*
      * TODO: See comments in readahead.h, ideally readahead state should be
      *       per file pointer (per open handle) but since fuse doesn't let
      *       us know the file pointer we maintain readahead state per inode.
@@ -523,6 +529,12 @@ static void aznfsc_ll_opendir(fuse_req_t req,
     struct nfs_inode *inode = client->get_nfs_inode_from_ino(ino);
 
     assert(inode->is_dir());
+
+    /*
+     * Fuse should not call opendir() for deleted inode.
+     * The inode will still be valid till a forget call is made.
+     */
+    assert(!inode->is_deleted);
 
     inode->on_fuse_open(FUSE_OPENDIR);
     assert(inode->opencnt > 0);

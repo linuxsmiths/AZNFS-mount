@@ -996,6 +996,11 @@ struct unlink_rpc_task
         return parent_ino;
     }
 
+    fuse_ino_t get_ino() const
+    {
+        return ino;
+    }
+
     const char *get_file_name() const
     {
         return file_name;
@@ -1009,6 +1014,11 @@ struct unlink_rpc_task
     void set_parent_ino(fuse_ino_t parent)
     {
         parent_ino = parent;
+    }
+
+    void set_ino(fuse_ino_t _ino)
+    {
+       ino = _ino;
     }
 
     void set_file_name(const char *name)
@@ -1030,6 +1040,9 @@ private:
     fuse_ino_t parent_ino;
     char *file_name;
 
+    // Inode being deleted.
+    fuse_ino_t ino;
+
     /*
      * Is this unlink task deleting a silly-renamed file when the last opencnt
      * is dropped? If yes, then we need to drop the extra ref on the parent
@@ -1050,6 +1063,11 @@ struct rmdir_rpc_task
         return dir_name;
     }
 
+    fuse_ino_t get_ino() const
+    {
+        return ino;
+    }
+
     void set_parent_ino(fuse_ino_t parent)
     {
         parent_ino = parent;
@@ -1060,6 +1078,11 @@ struct rmdir_rpc_task
         dir_name = ::strdup(name);
     }
 
+    void set_ino(fuse_ino_t dirino)
+    {
+        ino = dirino;
+    }
+
     void release()
     {
         ::free(dir_name);
@@ -1068,6 +1091,8 @@ struct rmdir_rpc_task
 private:
     fuse_ino_t parent_ino;
     char *dir_name;
+    // Inode of the directory being deleted.
+    fuse_ino_t ino;
 };
 
 struct symlink_rpc_task
@@ -1191,6 +1216,27 @@ struct rename_rpc_task
         return newname;
     }
 
+    void clear_ino_found()
+    {
+        ino_found = false;
+    }
+
+    void set_ino_to_be_deleted(fuse_ino_t ino_to_del)
+    {
+        ino_to_be_deleted = ino_to_del;
+        ino_found = true;
+    }
+
+    fuse_ino_t get_ino_to_be_deleted() const
+    {
+        return ino_to_be_deleted;
+    }
+
+    bool is_ino_found() const
+    {
+        return ino_found;
+    }
+
     /*
      * oldparent_ino/oldname will be non-zero/non-null only for silly rename
      * triggered by user requested rename operation.
@@ -1257,6 +1303,13 @@ private:
     fuse_ino_t parent_ino;
     fuse_ino_t newparent_ino;
     fuse_ino_t oldparent_ino;
+    /*
+     * This is the inode which will go out of scope once the rename
+     * operation completes.
+     */
+    bool ino_found;
+    fuse_ino_t ino_to_be_deleted;
+    
     char *name;
     char *newname;
     char *oldname;
@@ -2007,6 +2060,7 @@ public:
     void init_unlink(fuse_req *request,
                      fuse_ino_t parent_ino,
                      const char *name,
+                     fuse_ino_t ino, /* ino to be deleted */
                      bool for_silly_rename);
 
     void run_unlink();
@@ -2016,7 +2070,8 @@ public:
      */
     void init_rmdir(fuse_req *request,
                     fuse_ino_t parent_ino,
-                    const char *name);
+                    const char *name,
+                    fuse_ino_t ino /* ino to be deleted */);
 
     void run_rmdir();
 

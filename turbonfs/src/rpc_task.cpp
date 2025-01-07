@@ -470,12 +470,14 @@ void rpc_task::init_mkdir(fuse_req *request,
 void rpc_task::init_unlink(fuse_req *request,
                            fuse_ino_t parent_ino,
                            const char *name,
+                           fuse_ino_t ino,
                            bool for_silly_rename)
 {
     assert(get_op_type() == FUSE_UNLINK);
     set_fuse_req(request);
     rpc_api->unlink_task.set_parent_ino(parent_ino);
     rpc_api->unlink_task.set_file_name(name);
+    rpc_api->unlink_task.set_ino(ino);
     rpc_api->unlink_task.set_for_silly_rename(for_silly_rename);
 
     fh_hash = get_client()->get_nfs_inode_from_ino(parent_ino)->get_crc();
@@ -483,12 +485,14 @@ void rpc_task::init_unlink(fuse_req *request,
 
 void rpc_task::init_rmdir(fuse_req *request,
                           fuse_ino_t parent_ino,
-                          const char *name)
+                          const char *name,
+                          fuse_ino_t ino)
 {
     assert(get_op_type() == FUSE_RMDIR);
     set_fuse_req(request);
     rpc_api->rmdir_task.set_parent_ino(parent_ino);
     rpc_api->rmdir_task.set_dir_name(name);
+    rpc_api->rmdir_task.set_ino(ino);
 
     fh_hash = get_client()->get_nfs_inode_from_ino(parent_ino)->get_crc();
 }
@@ -547,6 +551,21 @@ void rpc_task::init_rename(fuse_req *request,
     rpc_api->rename_task.set_silly_rename_ino(silly_rename_ino);
     rpc_api->rename_task.set_oldparent_ino(oldparent_ino);
     rpc_api->rename_task.set_oldname(old_name);
+    rpc_api->rename_task.clear_ino_found();
+
+    if (!silly_rename)
+    {
+        /*
+         * If this is a client initiated rename, set the inode that will
+         * be marked deleted once the rename completes.
+         * This will be the inode of the destination if it exists.
+         */
+        struct nfs_inode *parent_inode = get_client()->get_nfs_inode_from_ino(newparent_ino);
+        struct nfs_inode *inode = parent_inode->lookup(newname);
+        if (inode) {
+            rpc_api->rename_task.set_ino_to_be_deleted(inode->get_fuse_ino());
+        }
+    }
 
     /*
      * In case of cross-dir rename, we have to choose between
@@ -1489,8 +1508,12 @@ void rmdir_callback(
     INJECT_JUKEBOX(res, task);
 #endif
 
-    const fuse_ino_t ino =
+    const fuse_ino_t parent_ino =
         task->rpc_api->rmdir_task.get_parent_ino();
+    struct nfs_inode *parent_inode =
+        task->get_client()->get_nfs_inode_from_ino(parent_ino);
+    const fuse_ino_t ino =
+        task->rpc_api->rmdir_task.get_ino();
     struct nfs_inode *inode =
         task->get_client()->get_nfs_inode_from_ino(ino);
     const int status = task->status(rpc_status, NFS_STATUS(res));
@@ -1511,9 +1534,14 @@ void rmdir_callback(
              * readdirectory_cache.
              */
             if (aznfsc_cfg.cache.attr.user.enable) {
-                UPDATE_INODE_WCC(inode, res->RMDIR3res_u.resok.dir_wcc);
+                UPDATE_INODE_WCC(parent_inode, res->RMDIR3res_u.resok.dir_wcc);
             } else {
-                UPDATE_INODE_ATTR(inode, res->RMDIR3res_u.resok.dir_wcc.after);
+                UPDATE_INODE_ATTR(parent_inode, res->RMDIR3res_u.resok.dir_wcc.after);
+            }
+
+            if (inode) {
+                // Now that the dir is removed, mark the inode as deleted.
+                inode->is_deleted = true;
             }
         }
         task->reply_error(status);
@@ -1666,6 +1694,12 @@ void rename_callback(
             silly_rename_inode->is_silly_renamed = true;
 
             /*
+             * We should no longer be able to get new fds to this inode,
+             * hence mark it deleted.
+             */
+            silly_rename_inode->is_deleted = true;
+
+            /*
              * Successfully (silly)renamed, hold a ref on the parent directory
              * inode so that it doesn't go away until we have deleted the
              * silly-renamed file. This ref is dropped in unlink_callback().
@@ -1697,6 +1731,16 @@ void rename_callback(
         task->get_client()->jukebox_retry(task);
     } else {
         if (status == 0) {
+            /*
+             * Now that the file is renamed, the old inode should no longer
+             * be accessible to new open call, hence mark it deleted.
+             */
+            if (!silly_rename && task->rpc_api->rename_task.is_ino_found()) {
+                task->get_client()->get_nfs_inode_from_ino(
+                    task->rpc_api->rename_task.get_ino_to_be_deleted())->is_deleted
+                    = true;
+            }
+
             /*
              * We cannot use UPDATE_INODE_WCC() here as we cannot update our
              * readdir cache with the newly created file/dir, as the readdir
@@ -4744,6 +4788,15 @@ void rpc_task::send_readdir_or_readdirplus_response(
             assert(it->nfs_inode);
             assert(it->nfs_inode->lookupcnt > 0);
             assert(it->nfs_inode->forget_expected > 0);
+
+            /*
+             * Readdirplus call should not return a deleted inode.
+             * This can happen if the server returns us stale entry from it's
+             * readdir cache.
+             * TODO: This should be fixed.
+             *       https://msazure.visualstudio.com/One/_workitems/edit/30621510
+             */
+            assert(!it->nfs_inode->is_deleted);
 
             struct fuse_entry_param fuseentry;
 
