@@ -4,13 +4,90 @@
 #include "rpc_task.h"
 #include "rpc_readdir.h"
 
+#include <azure/identity/azure_cli_credential.hpp>
+#include <azure/core/datetime.hpp>
+#include <nlohmann/json.hpp>
+
 #define NFS_STATUS(r) ((r) ? (r)->status : NFS3ERR_SERVERFAULT)
+
+using json = nlohmann::json;
+
+auth_token_cb_res* auth_token_callback(struct auth_context* auth) {
+    if (!auth) {
+        printf("Invalid auth_context received.\n");
+        return nullptr;
+    }
+
+    try {
+        // Allocate response structure
+        auth_token_cb_res* cb_res = (auth_token_cb_res*)malloc(sizeof(AZAUTH3args) + sizeof(uint64_t));
+        if (!cb_res) {
+            printf("Failed to allocate memory for auth_token_cb_res.\n");
+            return nullptr;
+        }
+
+        AZAUTH3args* azauthargs = new AZAUTH3args();
+
+        // Log user details
+        AZLogDebug(" tenantid {}, subid: {}, exportpath {} authtype: {}", 
+                   nfs_get_tenantid(auth),
+                   nfs_get_subscriptionid(auth),
+                   nfs_get_exportpath(auth),
+                   nfs_get_authtype(auth));
+
+        // Create Azure Token Request Context
+        Azure::Core::Credentials::TokenRequestContext tokenRequestContext;
+        tokenRequestContext.Scopes = { "https://storage.azure.com/.default" };
+        tokenRequestContext.TenantId = nfs_get_tenantid(auth);
+
+        Azure::Identity::AzureCliCredentialOptions options;
+        options.TenantId = nfs_get_tenantid(auth);
+        Azure::Identity::AzureCliCredential azcli(options);
+
+        Azure::Core::Credentials::AccessToken token = azcli.GetToken(tokenRequestContext, Azure::Core::Context());
+
+        // Prepare JSON object
+        json jsonObject = {
+            {"AuthToken", token.Token},
+            {"SubscriptionId", nfs_get_subscriptionid(auth)},
+            {"TenantId", nfs_get_tenantid(auth)},
+            {"AuthorizedTill", std::to_string(Azure::Core::_internal::PosixTimeConverter::DateTimeToPosixTime(token.ExpiresOn))}
+        };
+
+        // Convert JSON object to string
+        std::string jsonString = jsonObject.dump();
+
+        // Assign data to AZAUTH3args
+        azauthargs->authdata = strdup(jsonString.c_str());
+        azauthargs->client_version = strdup("123456789012345");
+
+        azauthargs->clientid.clientid_len = strlen("12345678");
+        azauthargs->clientid.clientid_val = strdup("12345678");
+
+        azauthargs->authtype = nfs_get_authtype(auth);
+        azauthargs->authtarget = nfs_get_exportpath(auth);
+
+        nfs_set_azauth_azauthargs(cb_res, azauthargs);
+        nfs_set_azauth_expirytime(cb_res, Azure::Core::_internal::PosixTimeConverter::DateTimeToPosixTime(token.ExpiresOn));
+
+        AZLogInfo("rpc_nfs3azauth args: authdata: {}, client_version: {}, authtype: {}", 
+                  azauthargs->authdata, azauthargs->client_version, azauthargs->authtype);
+
+        return cb_res;
+    } catch (const Azure::Core::RequestFailedException& e) {
+        printf("Status Code: %d Reason Phrase: %s\n", static_cast<int>(e.StatusCode), e.ReasonPhrase.c_str());
+        return nullptr;
+    }
+}
 
 // The user should first init the client class before using it.
 bool nfs_client::init()
 {
     // init() must be called only once.
     assert(root_fh == nullptr);
+
+    // Set the auth token callback for this connection.
+    set_auth_token_callback(auth_token_callback);
 
     /*
      * Setup RPC transport.

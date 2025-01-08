@@ -72,19 +72,6 @@ set(LIBFUSE_BUILD_DIR "${CMAKE_BINARY_DIR}/extern/libfuse")
 # git submodule add https://github.com/gabime/spdlog.git extern/spdlog
 # git submodule add https://github.com/libfuse/libfuse.git extern/libfuse
 #
-find_package(Git QUIET)
-if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/../.git")
-    option(GIT_SUBMODULE "Check submodules during build" ON)
-    if(GIT_SUBMODULE)
-        message(STATUS "Submodule update")
-        execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
-                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-                        RESULT_VARIABLE GIT_SUBMOD_RESULT)
-        if(NOT GIT_SUBMOD_RESULT EQUAL "0")
-            message(FATAL_ERROR "git submodule update --init --recursive failed with ${GIT_SUBMOD_RESULT}, please checkout submodules")
-        endif()
-    endif()
-endif()
 
 if(NOT EXISTS "${PROJECT_SOURCE_DIR}/extern/libnfs/CMakeLists.txt")
     message(FATAL_ERROR "The libnfs submodule was not downloaded! GIT_SUBMODULE was turned off or failed. Please update submodules and try again.")
@@ -172,6 +159,22 @@ if(NOT GNUTLS_FOUND)
     else()
         find_package(GnuTLS "3.4.6" REQUIRED)
     endif()
+endif()
+
+find_package(nlohmann_json QUIET)
+
+if(NOT nlohmann_json_FOUND)
+    message(STATUS "nlohmann_json not found, downloading it using FetchContent...")
+
+    include(FetchContent)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.2 # Specify a stable version tag
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+else()
+    message(STATUS "Using nlohmann_json library")
 endif()
 
 #
@@ -287,7 +290,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
                       yaml-cpp
                       spdlog
                       Azure::azure-identity 
-                      Azure::azure-storage-blobs)
+                      Azure::azure-storage-blobs
+                      nlohmann_json::nlohmann_json)
 
 if(ENABLE_TCMALLOC)
 target_link_libraries(${CMAKE_PROJECT_NAME}

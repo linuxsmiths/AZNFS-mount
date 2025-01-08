@@ -109,6 +109,13 @@ do { \
 #endif
         }
 
+        _CHECK_BOOL(performauth)
+        if (performauth) {
+            _CHECK_STR(tenantid);
+            _CHECK_STR(subscriptionid);
+            _CHECK_STR(authtype);
+        }
+
         _CHECK_INT(nconnect, AZNFSCFG_NCONNECT_MIN, AZNFSCFG_NCONNECT_MAX);
         _CHECK_INT(timeo, AZNFSCFG_TIMEO_MIN, AZNFSCFG_TIMEO_MAX);
         _CHECK_INT(acregmin, AZNFSCFG_ACTIMEO_MIN, AZNFSCFG_ACTIMEO_MAX);
@@ -316,6 +323,10 @@ void aznfsc_cfg::set_defaults_and_sanitize()
 #ifdef ENABLE_PRESSURE_POINTS
     AZLogDebug("inject_err_prob_pct_def = {}", inject_err_prob_pct_def);
 #endif
+    AZLogDebug("performauth = {}", performauth);
+    AZLogDebug("tenantid = {}", tenantid);
+    AZLogDebug("subscriptionid = {}", subscriptionid);
+    AZLogDebug("authtype = {}", authtype);
     AZLogDebug("port = {}", port);
     AZLogDebug("nconnect = {}", nconnect);
     AZLogDebug("rsize = {}", rsize);
