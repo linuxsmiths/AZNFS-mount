@@ -23,12 +23,11 @@ bool nfs_connection::open()
     const std::string url_str = mo.get_url_str();
 
     int performauth = 0;
-    if (mo.perform_auth)
-    {
+    int auth_values_set = -1;
+
+    if (mo.perform_auth) {
         performauth = 1;
     }
-
-    int auth_values_set = -1;
 
     AZLogDebug("Parsing NFS URL string: {}", url_str);
 
@@ -44,14 +43,12 @@ bool nfs_connection::open()
     nfs_destroy_url(url);
 
     auth_values_set = nfs_use_azauth(nfs_context, performauth);
-    if (auth_values_set != 0)
-    {
+    if (auth_values_set != 0) {
         AZLogError("Failed to set auth values in nfs context");
         goto destroy_context;
     }
 
-    if (performauth == 1)
-    {
+    if (performauth == 1) {
         assert(!mo.export_path.empty());
         assert(!mo.tenantid.empty());
         assert(!mo.subscriptionid.empty());
@@ -62,8 +59,7 @@ bool nfs_connection::open()
                         mo.tenantid.c_str(), 
                         mo.subscriptionid.c_str(),
                         mo.authtype.c_str());
-        if (auth_values_set != 0)
-        {
+        if (auth_values_set != 0) {
             AZLogError("Failed to set auth values in nfs context when performauth={}, tenantid={} subid={} authtype={}",
                         performauth,
                         mo.tenantid.c_str(), 
