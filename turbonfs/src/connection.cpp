@@ -18,6 +18,7 @@ bool nfs_connection::open()
         return false;
     }
 
+
     struct mount_options& mo = client->mnt_options;
     const std::string url_str = mo.get_url_str();
     int is_auth_values_set = -1;
