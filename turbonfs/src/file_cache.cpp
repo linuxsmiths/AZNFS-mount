@@ -2302,6 +2302,42 @@ std::vector<bytes_chunk> bytes_chunk_cache::get_flushing_bc_range(
     return bc_vec;
 }
 
+std::vector<bytes_chunk> bytes_chunk_cache::get_contigious_dirty_bcs(uint64_t& size)
+{
+    std::vector<bytes_chunk> bc_vec;
+    size = 0;
+
+    // TODO: Make it shared lock.
+    const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
+    auto it = chunkmap.lower_bound(0);
+    uint64_t prev_offset = AZNFSC_BAD_OFFSET;
+
+    while (it != chunkmap.cend()) {
+        const struct bytes_chunk& bc = it->second;
+        struct membuf *mb = bc.get_membuf();
+
+        if (mb->is_dirty() && !mb->is_flushing()) {
+            if (prev_offset != AZNFSC_BAD_OFFSET) {
+                if (prev_offset != bc.offset) {
+                    break;
+                } else {
+                    size += bc.length;
+                    prev_offset = bc.offset + bc.length;
+                }
+            } else {
+                size += bc.length;
+                prev_offset = bc.offset + bc.length;
+            }
+            mb->set_inuse();
+            bc_vec.emplace_back(bc);
+        }
+
+        ++it;
+    }
+
+    return bc_vec;
+}
+
 std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_bc_range(uint64_t start_off, uint64_t end_off) const
 {
     std::vector<bytes_chunk> bc_vec;

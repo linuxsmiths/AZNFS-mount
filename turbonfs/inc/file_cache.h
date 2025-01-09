@@ -1192,6 +1192,8 @@ public:
      */
     std::vector<bytes_chunk> get_commit_pending_bcs() const;
 
+    std::vector<bytes_chunk> get_contigious_dirty_bcs(uint64_t& size);
+
     /**
      * Drop cached data in the given range.
      * This must be called only for file-backed caches. For non file-backed
@@ -1262,7 +1264,7 @@ public:
 
     /**
      * Maximum size a dirty extent can grow before we should flush it.
-     * This is 60% of the allowed cache size or 1GB whichever is lower.
+     * This is 30% of the allowed cache size or 1GB whichever is lower.
      * The reason for limiting it to 1GB is because there's not much value in
      * holding more data than the Blob NFS server's scheduler cache size.
      * We want to send as prompt as possible to utilize the n/w b/w but slow
@@ -1274,9 +1276,36 @@ public:
         static const uint64_t max_total =
             (aznfsc_cfg.cache.data.user.max_size_mb * 1024 * 1024ULL);
         assert(max_total != 0);
-        static const uint64_t max_dirty_extent = (max_total * 0.6);
+        static const uint64_t max_dirty_extent =
+                std::max((uint64_t)(max_total * 0.3), (uint64_t)AZNFSCFG_WSIZE_MAX);
 
         return std::min(max_dirty_extent, uint64_t(1024 * 1024 * 1024ULL));
+    }
+
+    /*
+     * Maximum size of commit bytes that can be pending in cache, before we
+     * should commit it to Blob.
+     * It should be greater than max_dirty_extent_bytes() and smaller than
+     * inline_dirty_threshold. So, that inline pruning can be avoided.
+     * This is 60% of the allowed cache size.
+     * f.e = Cache size of 4GB then max_commit_bytes = 2.4GB
+     * - Flush will start every 1GB dirty data and each 1GB dirty data
+     *   converted to commit_pending_bytes.
+     *
+     * This is 60% of the allowed cache size.
+     */
+    uint64_t max_commit_bytes() const
+    {
+        // Maximum cache size allowed in bytes.
+        static const uint64_t max_total =
+            (aznfsc_cfg.cache.data.user.max_size_mb * 1024 * 1024ULL);
+        assert(max_total != 0);
+
+        static const uint64_t max_commit_bytes =
+            (((uint64_t)(max_total * 0.6))/ max_dirty_extent_bytes()) * max_dirty_extent_bytes();
+
+        return std::max((max_commit_bytes - AZNFSCFG_WSIZE_MIN),
+            ((2 * max_dirty_extent_bytes()) - AZNFSCFG_WSIZE_MIN));
     }
 
     /**
@@ -1327,6 +1356,43 @@ public:
         return bytes_flushing > 0;
     }
 
+    /*
+     * get_bytes_to_prune() returns the number of bytes that need to be flushed
+     * inline to free up the space. If there are enough bytes_flushing then we
+     * can just wait for them to complete.
+     *
+     * Note : We are not considering bytes_commit_pending in this calculation.
+     *        If bytes_commit_pending are high then commit already started and
+     *        if bytes_flushing are high once flushing is done commit will be
+     *        triggered.
+     */
+    uint64_t get_bytes_to_prune() const
+    {
+        static const uint64_t max_dirty_allowed_per_cache =
+            max_dirty_extent_bytes() * 2;
+        int64_t total_bytes =
+            std::max(int64_t(bytes_dirty - bytes_flushing), int64_t(0));
+        const bool local_pressure = total_bytes > (int64_t)max_dirty_allowed_per_cache;
+
+        if (local_pressure) {
+            return max_dirty_extent_bytes();
+        }
+
+        /*
+         * Global pressure is when get_prune_goals() returns non-zero bytes
+         * to be pruned inline.
+         */
+        uint64_t inline_bytes;
+
+        /*
+         * TODO: Noisy neighbor syndrome, where one file is hogging the cache,
+         *       inline pruning will be triggered for other files.
+         */
+        get_prune_goals(&inline_bytes, nullptr);
+        return std::max(int64_t(inline_bytes - (bytes_flushing + bytes_commit_pending)),
+                    (int64_t)0);
+    }
+
     /**
      * This should be called by writer threads to find out if they must wait
      * for the write to complete. This will check both the cache specific and
@@ -1334,14 +1400,29 @@ public:
      */
     bool do_inline_write() const
     {
+        // Maximum cache size allowed in bytes.
+        static const uint64_t max_total =
+            (aznfsc_cfg.cache.data.user.max_size_mb * 1024 * 1024ULL);
+        assert(max_total != 0);
+
         /*
-         * Allow two dirty extents before we force inline write.
-         * This way one of the extent can be getting flushed and we can populate
-         * the second one.
+         * Allow upto 80% of the cache size to be dirty.
+         * After this we enforce inline pruning for writers. This is to avoid
+         * writers getting blocked due to memory pressure. We allow upto 80%
+         * because we don't want to prune too aggressively, as it hurts write
+         * performance.
          */
         static const uint64_t max_dirty_allowed_per_cache =
-            max_dirty_extent_bytes() * 2;
-        const bool local_pressure = bytes_dirty > max_dirty_allowed_per_cache;
+            max_total * 0.8;
+
+        /*
+         * If current cache usage is more than the max_dirty_allowed_per_cache
+         * limit, we need to enforce inline pruning. Cache usage is the sum of
+         * bytes_dirty and bytes_commit_pending. Membufs can be dirty or commit
+         * pending, but not both at the same time. Both dirty and commit pending
+         * occupy memory, so we need to account for both.
+         */
+        const bool local_pressure = (bytes_dirty + bytes_commit_pending) > max_dirty_allowed_per_cache;
 
         if (local_pressure) {
             return true;

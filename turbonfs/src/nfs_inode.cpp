@@ -34,7 +34,7 @@ nfs_inode::nfs_inode(const struct nfs_fh3 *filehandle,
     assert(write_error == 0);
 
     // TODO: Revert this to false once commit changes integrated.
-    assert(stable_write == true);
+    assert(stable_write == false);
     assert(commit_state == commit_state_t::COMMIT_NOT_NEEDED);
 
 #ifndef ENABLE_NON_AZURE_NFS
@@ -375,10 +375,142 @@ int nfs_inode::get_actimeo_max() const
     }
 }
 
+/*
+ * Caller should hold flush_lock().
+ */
+void nfs_inode::wait_for_ongoing_commit()
+{
+    assert(is_flushing);
+
+    while (is_commit_in_progress()) {
+        assert(!get_filecache()->is_flushing_in_progress());
+        ::usleep(1000);
+    }
+
+    assert(is_commit_in_progress() == false);
+}
+
+/*
+ * This function is called with flush_lock() held.
+ * In normal case this function should be no-op as
+ * when we reach here all the previous flushes/commits
+ * should have been completed. But in case of committing
+ * at the close of file, we need to wait if any flush
+ * going on and commit all the dirty membufs which are
+ * not yet committed.
+ */
+void nfs_inode::switch_to_stable_write()
+{
+    AZLogInfo("[{}] Switching to stable write", ino);
+
+    /*
+     * We should not be in commit in progress state.
+     * Switch_to_stable_write() is called by flush thread
+     * and it shouldn't be called when commit is in progress.
+     */
+    assert(is_commit_in_progress() == false);
+
+    /*
+     * switch_to_stable_write() called from following paths.
+     * 1. sync_membufs(), No new flush should be started if
+     *    there is ongoing flush is in progress.
+     * 2. flush_cache_and_wait(), Wait for ongoing flush to
+     *    complete.
+     * These are only two paths from where we flush writes.
+     */
+    assert(!get_filecache()->is_flushing_in_progress());
+
+    /*
+     * Check if there is anything to commit, if not then
+     * switch to stable write.
+     */
+    if (get_filecache()->get_bytes_to_commit() == 0) {
+        AZLogDebug("[{}] Nothing to commit, switching to stable write", ino);
+        set_stable_write();
+        return;
+    }
+
+    /*
+     * If there is something to commit, then commit it and
+     * wait for the commit to complete.
+     */
+    set_commit_in_progress();
+    commit_membufs();
+    wait_for_ongoing_commit();
+
+    assert(get_filecache()->get_bytes_to_commit() == 0);
+    assert(!get_filecache()->is_flushing_in_progress());
+    assert(!is_commit_in_progress());
+
+    set_stable_write();
+    return;
+}
+
+/*
+ * This function checks, whether switch to stable write or not.
+ */
+bool nfs_inode::check_stable_write_required(off_t offset)
+{
+    /*
+     * If stable_write is already set, we don't need to do anything.
+     * We don't need lock here as once stable_write is set it's never
+     * unset.
+     */
+    if (is_stable_write()) {
+        return false;
+    }
+
+    /*
+     * If current write is not append write, then we can't go for unstable writes
+     * It may be overwrite to existing data and we don't have the knowldege of existing
+     * block list, it maye require read modified write. So, we can't go for unstable write.
+     * Similarly, if the offset is more than end of the file, we need to write zero block
+     * in between the current end of the file and the offset.
+     */
+    if (putblock_filesize != offset) {
+        AZLogInfo("Stable write required as flushed_size:{} is not at the offset:{}", putblock_filesize, offset);
+
+        return true;
+    }
+
+    return false;
+}
+
+
+/**
+ * commit_membufs() is called by writer thread to commit flushed membufs.
+ */
+void nfs_inode::commit_membufs()
+{
+    /*
+     * Create the commit task to carry out the write.
+     */
+    struct rpc_task *commit_task =
+                get_client()->get_rpc_task_helper()->alloc_rpc_task(FUSE_FLUSH);
+    commit_task->init_flush(nullptr /* fuse_req */, ino);
+    assert(commit_task->rpc_api->pvt == nullptr);
+
+    commit_task->issue_commit_rpc();
+}
+
 void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
 {
+    /*
+     * New flush should not be started if flush/commit is in progress.
+     */
+    assert(!is_commit_in_progress());
+    assert(!get_filecache()->is_flushing_in_progress());
+
     if (bc_vec.empty()) {
         return;
+    }
+
+    /*
+     * If new offset is not at the end of the file,
+     * then we need to switch to stable write.
+     */
+    if(check_stable_write_required(bc_vec[0].offset)) {
+        switch_to_stable_write();
     }
 
     /*
@@ -470,6 +602,9 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
          * Once packed completely, then dispatch the write.
          */
         if (write_task->add_bc(bc)) {
+            if ((uint64_t) putblock_filesize == bc.offset) {
+                putblock_filesize += bc.length;
+            }
             continue;
         } else {
             /*
@@ -490,6 +625,9 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
             // Single bc addition should not fail.
             [[maybe_unused]] bool res = write_task->add_bc(bc);
             assert(res == true);
+            if ((uint64_t)putblock_filesize == bc.offset) {
+                putblock_filesize += bc.length;
+            }
         }
     }
 
@@ -498,6 +636,7 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush)
         write_task->issue_write_rpc();
     }
 }
+
 
 /**
  * Note: This takes exclusive lock on ilock_1.
@@ -685,6 +824,9 @@ try_copy:
 
 /**
  * Note: Caller should call with flush_lock() held.
+ *
+ * TODO: In case of commit all the dirty membufs on file close,
+ *       truncate call should commit all the dirty membufs.
  */
 int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
 {
@@ -712,20 +854,29 @@ int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
     /*
      * Flushing not in progress and no new flushing can be started as we hold
      * the flush_lock().
+     * It may be possible that the flush is not in progress and but we may have
+     * commit_in_progress. In that case we need to wait for the commit to complete.
      */
-    if (!get_filecache()->is_flushing_in_progress()) {
+    if (!get_filecache()->is_flushing_in_progress() && !is_commit_in_progress()) {
         AZLogDebug("[{}] No flush in progress, returning", ino);
         return 0;
     }
 
+    std::vector<bytes_chunk> bc_vec = {};
     /*
-     * Get the flushing bytes_chunk from the filecache handle.
-     * This will grab an exclusive lock on the file cache and return the list
-     * of flushing bytes_chunks at that point. Note that we can have new dirty
-     * bytes_chunks created but we don't want to wait for those.
+     * Try to get the flushing bytes_chunk from the filecache handle if the
+     * flush is in progress.
      */
-    std::vector<bytes_chunk> bc_vec =
-        filecache_handle->get_flushing_bc_range(start_off, end_off);
+    if (get_filecache()->is_flushing_in_progress()) {
+        /*
+        * Get the flushing bytes_chunk from the filecache handle.
+        * This will grab an exclusive lock on the file cache and return the list
+        * of flushing bytes_chunks at that point. Note that we can have new dirty
+        * bytes_chunks created but we don't want to wait for those.
+        */
+        bc_vec =
+            filecache_handle->get_flushing_bc_range(start_off, end_off);
+    }
 
     /*
      * Our caller expects us to return only after the flush completes.
@@ -768,16 +919,33 @@ int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
          */
         filecache_handle->release(bc.offset, bc.length);
     }
+
     AZLogDebug("[{}] wait_for_ongoing_flush() returning with error: {}",
               ino, get_write_error());
+
+    wait_for_ongoing_commit();
     return get_write_error();
 }
 
 /**
- * Note: This takes shared lock on ilock_1.
+ * flsuh_cache_and_wait() is called by the writer/release thread to do inline
+ * flush of the dirty membufs.
+ * - Flush_lock held all the time, so that no new flush/commit can be started.
+ * - Before flushing it needs to wait for any ongoing commit to complete.
+ * - After that it gets the dirty membufs from the filecache handle, flushes
+ *   them.
+ * - First it try to get contigious dirty membufs and check if it meets the
+ *   prune_bytes, if not then it try to get all the dirty membufs and switch
+ *   to stable write.
+ * - For release case, it gets all the dirty membufs and switch to stable write.
+ *   The reason for that we don't know if get_contigious_dirty_bcs() returned
+ *   all the dirty membufs or not. It can be optimized, but for now we are
+ *   keeping it simple.
  */
-int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
+int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off, bool is_release)
 {
+    assert(start_off < end_off);
+
     /*
      * MUST be called only for regular files.
      * Leave the assert to catch if fuse ever calls flush() on non-reg files.
@@ -817,13 +985,90 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
     flush_lock();
 
     /*
+     * Check if inline write is required or not.
+     * As it may happen previous thread may have already flushed
+     * the dirty membufs and we don't need to do inline write.
+     */
+    if (!is_release && !get_filecache()->do_inline_write()) {
+        flush_unlock();
+        AZLogDebug("[{}] Inline write not required", ino);
+        return 0;
+    }
+
+    /*
+     * If flush is in progress, wait for it to complete.
+     * It may happen that last flush is still in progress and we need to wait
+     * for it to complete before we start the new flush.
+     * As we have the flush_lock() we are guaranteed that no new flush can be
+     * started till we release the flush_lock().
+     *
+     * wait_for_ongoing_flush() will wait for the ongoing flush/commt to complete.
+     */
+    const int err = wait_for_ongoing_flush(0, UINT64_MAX);
+    if (err != 0) {
+        AZLogError("[{}] Failed to flush cache to stable storage, "
+                    "error={}", ino, err);
+        flush_unlock();
+        return err;
+    }
+
+    /*
      * Get the dirty bytes_chunk from the filecache handle.
      * This will grab an exclusive lock on the file cache and return the list
      * of dirty bytes_chunks at that point. Note that we can have new dirty
      * bytes_chunks created but we don't want to wait for those.
      */
-    std::vector<bytes_chunk> bc_vec =
-        filecache_handle->get_dirty_bc_range(start_off, end_off);
+    std::vector<bytes_chunk> bc_vec;
+    uint64_t size = 0;
+    if (is_release) {
+        /*
+        * Get the dirty bytes_chunk from the filecache handle.
+        * This will grab an exclusive lock on the file cache and return the list
+        * of dirty bytes_chunks at that point. Note that we can have new dirty
+        * bytes_chunks created but we don't want to wait for those.
+        */
+        if (!is_stable_write()) {
+            bc_vec = filecache_handle->get_contigious_dirty_bcs(size);
+
+            if (size != get_filecache()->get_bytes_to_flush()) {
+                AZLogInfo("SWITCHING TO STABLE WRITE");
+                switch_to_stable_write();
+                for (auto& bc : bc_vec) {
+                    bc.get_membuf()->clear_inuse();
+                }
+                bc_vec = filecache_handle->get_dirty_bc_range(start_off, end_off);
+            }
+        } else {
+            assert(get_filecache()->get_bytes_to_commit() == 0);
+            bc_vec = filecache_handle->get_dirty_bc_range(start_off, end_off);
+        }
+    } else {
+        uint64_t prune_bytes = get_filecache()->get_bytes_to_prune();
+        assert(prune_bytes > 0);
+
+        /*
+         * If prune_bytes is greater than the size of the bytes_chunk_vector returned
+         * then we need to switch to stable write.
+         */
+        bc_vec = filecache_handle->get_contigious_dirty_bcs(size);
+        if (prune_bytes > size) {
+            AZLogInfo("[{}] Prune bytes: {} > size: {}", ino, prune_bytes, size);
+            AZLogInfo("SWITCHING TO STABLE WRITE");
+            for (auto& bc : bc_vec) {
+                bc.get_membuf()->clear_inuse();
+            }
+
+            /*
+             * Switch to stable write and get all the dirty
+             * membufs from the filecache handle.
+             */
+            switch_to_stable_write();
+            bc_vec = filecache_handle->get_dirty_bc_range(start_off, end_off);
+        } else {
+            AZLogInfo("[{}] Prune bytes: {} <= size: {}", ino, prune_bytes, size);
+            AZLogInfo("Flush the contigious dirty membufs");
+        }
+    }
 
     /*
      * sync_membufs() iterate over the bc_vec and starts flushing the dirty
@@ -872,6 +1117,19 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
          *       released it, so we need to release it now.
          */
         filecache_handle->release(bc.offset, bc.length);
+    }
+
+    /*
+     * If this is a release call, then we need to commit all the dirty membufs
+     * which are not yet committed and need to wait for the commit to complete.
+     * For regular write, we don't need to commit as next write will take care
+     * of it.
+     */
+    if (is_release && (get_filecache()->get_bytes_to_commit() > 0)) {
+        assert(!is_commit_in_progress());
+        set_commit_in_progress();
+        commit_membufs();
+        wait_for_ongoing_commit();
     }
 
     flush_unlock();
@@ -973,6 +1231,12 @@ bool nfs_inode::truncate_start(size_t size)
     auto truncate_size = filecache_handle->truncate(size);
 
     AZLogDebug("[{}] Filecache truncated to size={}", ino, truncate_size);
+
+    /*
+     * Set the new file size in the inode's cached attributes.
+     */
+    in_cache_filesize = size;
+    putblock_filesize = size;
 
     return true;
 }

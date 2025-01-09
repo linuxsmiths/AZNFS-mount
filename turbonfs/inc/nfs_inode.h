@@ -279,6 +279,9 @@ private:
      */
     struct stat attr;
 
+    off_t in_cache_filesize = 0;
+    off_t putblock_filesize = 0;
+
     /*
      * Has this inode seen any non-append write?
      * This starts as false and remains false as long as copy_to_cache() only
@@ -300,7 +303,7 @@ private:
      * Note: As of now, we are not using this flag as commit changes not yet
      *       integrated, so we are setting this flag to true.
      */
-    bool stable_write = true;
+    bool stable_write = false;
 
 public:
     /*
@@ -417,6 +420,12 @@ public:
     };
 
     std::atomic<commit_state_t> commit_state = commit_state_t::COMMIT_NOT_NEEDED;
+
+    /*
+     * commit_lock_5 is used to synchronize flush thread and write thread
+     * for commit operation.
+     */
+    std::mutex commit_lock_5;
 
     /**
      * TODO: Initialize attr with postop attributes received in the RPC
@@ -947,14 +956,14 @@ public:
          *       updated from postop attributes. We will need to correctly
          *       update that when file is truncated f.e.
          */
-        if (!non_append_writes_seen && (offset != attr.st_size)) {
+        if (!non_append_writes_seen && (offset != in_cache_filesize)) {
             non_append_writes_seen = true;
             AZLogInfo("[{}] Non-append write seen [{}, {}), file size: {}",
-                      ino, offset, offset+length, attr.st_size);
+                      ino, offset, offset+length, in_cache_filesize);
         }
 
-        if (new_size > attr.st_size) {
-            attr.st_size = new_size;
+        if (new_size > in_cache_filesize) {
+            in_cache_filesize = new_size;
         }
     }
 
@@ -1130,7 +1139,8 @@ public:
     bool is_commit_in_progress() const
     {
         assert(commit_state != commit_state_t::INVALID);
-        return (commit_state == commit_state_t::COMMIT_IN_PROGRESS);
+        return ((commit_state == commit_state_t::COMMIT_IN_PROGRESS) ||
+                (commit_state == commit_state_t::NEEDS_COMMIT));
     }
 
     /**
@@ -1316,7 +1326,7 @@ public:
      *       progress (which must have held the is_flushing lock).
      */
     int flush_cache_and_wait(uint64_t start_off = 0,
-                             uint64_t end_off = UINT64_MAX);
+                             uint64_t end_off = UINT64_MAX, bool is_release = true);
 
     /**
      * Wait for currently flushing membufs to complete.
@@ -1327,6 +1337,33 @@ public:
      */
     int wait_for_ongoing_flush(uint64_t start_off = 0,
                                uint64_t end_off = UINT64_MAX);
+
+    /*
+     * commit_membufs() is called to commit uncommitted membufs to the BLOB.
+     * It creates commit RPC and sends it to the NFS server.
+     */
+    void commit_membufs();
+
+
+    /*
+     * switch_to_stable_write() is called to switch the inode to stable write
+     * mode. There is should be no ongoing commit/flusing operation when this
+     * is called. It creates a commit RPC to commit all the uncopmmitted membufs
+     * to the BLOB.
+     */
+    void switch_to_stable_write();
+
+    /**
+     * Check if stable write is required for the given offset.
+     * Given offset is the start of contigious dirty membufs that need to be
+     * flushed to the BLOB.
+     */
+    bool check_stable_write_required(off_t offset);
+
+    /**
+     * Wait for ongoing commit operation to complete.
+     */
+    void wait_for_ongoing_commit();
 
     /**
      * Sync the dirty membufs in the file cache to the NFS server.

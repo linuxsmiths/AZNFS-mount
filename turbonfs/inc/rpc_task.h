@@ -1474,7 +1474,6 @@ struct api_task_info
      */
     fuse_req *req = nullptr;
 
-
     /*
      * Only valid for FUSE_READ.
      *
@@ -2177,6 +2176,8 @@ public:
         return stats;
     }
 
+    void set_task_csched(bool stable_write);
+
     struct nfs_context *get_nfs_context() const;
 
     struct rpc_context *get_rpc_ctx() const
@@ -2502,6 +2503,8 @@ public:
      */
     bool add_bc(const bytes_chunk& bc);
     void issue_write_rpc();
+
+    void issue_commit_rpc();
 
 #ifdef ENABLE_NO_FUSE
     /*

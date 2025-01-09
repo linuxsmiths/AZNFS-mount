@@ -116,9 +116,6 @@ public:
      */
     void on_rpc_issue()
     {
-        // FUSE_FLUSH is never issued as an RPC task to the server. FUSE_WRITE is issued instead.
-        assert(optype != FUSE_FLUSH);
-
         assert(stamp.issue == 0);
         stamp.issue = get_current_usecs();
         assert(stamp.issue >= stamp.create);
@@ -133,9 +130,6 @@ public:
      */
     void on_rpc_cancel()
     {
-        // FUSE_FLUSH is never issued as an RPC task to the server. FUSE_WRITE is issued instead.
-        assert(optype != FUSE_FLUSH);
-
         assert(stamp.issue != 0);
         assert((int64_t) stamp.issue <= get_current_usecs());
         assert(stamp.dispatch == 0);
@@ -155,9 +149,6 @@ public:
      */
     void on_rpc_complete(struct rpc_pdu *pdu, nfsstat3 status)
     {
-        // FUSE_FLUSH is never issued as an RPC task to the server. FUSE_WRITE is issued instead.
-        assert(optype != FUSE_FLUSH);
-
         assert(nfsstat3_to_errno(status) != -ERANGE);
 
         req_size = rpc_pdu_get_req_size(pdu);
