@@ -185,7 +185,7 @@ struct nfs_inode
     /*
      * This will be marked to true when this inode is deleted.
      */
-    std::atomic<uint64_t> is_deleted = 0;
+    std::atomic<bool> is_deleted = 0;
 
     /*
      * Silly rename related info.

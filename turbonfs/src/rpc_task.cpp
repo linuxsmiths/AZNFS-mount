@@ -1448,7 +1448,15 @@ void unlink_callback(
             } else {
                 UPDATE_INODE_ATTR(parent_inode, res->REMOVE3res_u.resok.dir_wcc.after);
             }
-        }
+
+	    // Now that the file is deleted, mark the inode as deleted.
+	    const fuse_ino_t ino = task->rpc_api->unlink_task.get_ino();
+	    struct nfs_inode *inode =
+		    task->get_client()->get_nfs_inode_from_ino(ino);
+	    assert (inode != nullptr);
+	    AZLogDebug("Marking inode {} as deleted", ino);
+	    inode->is_deleted = true;
+	}
 
         if (task->get_fuse_req()) {
             task->reply_error(status);
@@ -1529,7 +1537,8 @@ void rmdir_callback(
 
             if (inode) {
                 // Now that the dir is removed, mark the inode as deleted.
-                inode->is_deleted = true;
+                AZLogDebug("Marking inode {} as deleted", ino);
+		inode->is_deleted = true;
             }
         }
         task->reply_error(status);
@@ -1752,6 +1761,7 @@ void rename_callback(
                  * longer be accessible to new open call, hence mark it
                  * deleted.
                  */
+		AZLogDebug("Marking inode {} as deleted", ino_to_del);
                 inode_to_mark_del->is_deleted = true;
             }
 
@@ -1786,9 +1796,6 @@ void rename_callback(
                 struct rpc_task *rename_tsk =
                     task->get_client()->get_rpc_task_helper()->alloc_rpc_task_reserved(FUSE_RENAME);
 
-                /*
-                 * TODO: Mark the renamed node as deleted.
-                 */
                 rename_tsk->init_rename(
                     task->rpc_api->req,
                     task->rpc_api->rename_task.get_oldparent_ino(),

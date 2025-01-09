@@ -412,7 +412,8 @@ void nfs_client::jukebox_runner()
                            js->rpc_api->rename_task.get_name(),
                            js->rpc_api->rename_task.get_newparent_ino(),
                            js->rpc_api->rename_task.get_newname(),
-                           js->rpc_api->rename_task.get_silly_rename(),
+                           js->rpc_api->rename_task.get_ino_to_be_deleted(),
+			   js->rpc_api->rename_task.get_silly_rename(),
                            js->rpc_api->rename_task.get_silly_rename_ino(),
                            js->rpc_api->rename_task.get_oldparent_ino(),
                            js->rpc_api->rename_task.get_oldname());

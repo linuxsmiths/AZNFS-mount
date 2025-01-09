@@ -2048,7 +2048,7 @@ public:
     void init_unlink(fuse_req *request,
                      fuse_ino_t parent_ino,
                      const char *name,
-                     fuse_ino_t ino, /* ino to be deleted */
+                     fuse_ino_t ino,
                      bool for_silly_rename);
 
     void run_unlink();
@@ -2059,7 +2059,7 @@ public:
     void init_rmdir(fuse_req *request,
                     fuse_ino_t parent_ino,
                     const char *name,
-                    fuse_ino_t ino /* ino to be deleted */);
+                    fuse_ino_t ino);
 
     void run_rmdir();
 

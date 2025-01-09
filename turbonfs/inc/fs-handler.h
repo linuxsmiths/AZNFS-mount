@@ -271,8 +271,8 @@ static void aznfsc_ll_rename(fuse_req_t req,
         return;
     }
 
-    struct nfs_inode *parent_inode = client->get_nfs_inode_from_ino(parent_ino);
-    struct nfs_inode *inode = parent_inode->lookup(name);
+    struct nfs_inode *newparent_inode = client->get_nfs_inode_from_ino(newparent_ino);
+    struct nfs_inode *inode = newparent_inode->lookup(newname);
     const fuse_ino_t ino_to_del = inode ? inode->get_fuse_ino(): 0; 
 
     // Perform user requested rename.
