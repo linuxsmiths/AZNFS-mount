@@ -9,6 +9,14 @@ cloud_suffix: blob.preprod.core.windows.net
 port: 2047
 
 #
+# Auth Config
+#
+performauth: true
+tenantid: ad304624-d4a2-4f1e-8f5f-9b8ba34e22f9
+subscriptionid: 7bb33dc9-b004-4fb6-96af-df9bcc1c222b
+authtype: AzAuthAAD
+
+#
 # NFS mount options
 # These have the same name and meaning as Linux NFS client mount options.
 # Also note that only a subset of Linux mount options are supported.

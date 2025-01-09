@@ -160,6 +160,22 @@ add_custom_command(
 
 add_custom_target(libfuse ALL DEPENDS ${fuse3_LIBRARY})
 
+find_package(nlohmann_json QUIET)
+
+if(NOT nlohmann_json_FOUND)
+    message(STATUS "nlohmann_json not found, downloading it using FetchContent...")
+
+    include(FetchContent)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.2 # Specify a stable version tag
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+else()
+    message(STATUS "Using nlohmann_json library")
+endif()
+
 #
 # We need GnuTLS for secure libnfs transport.
 #
@@ -289,7 +305,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
                       yaml-cpp
                       spdlog
                       Azure::azure-identity 
-                      Azure::azure-storage-blobs)
+                      Azure::azure-storage-blobs
+                      nlohmann_json::nlohmann_json)
 
 if(ENABLE_TCMALLOC)
 target_link_libraries(${CMAKE_PROJECT_NAME}

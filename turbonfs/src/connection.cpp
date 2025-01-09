@@ -21,6 +21,8 @@ bool nfs_connection::open()
     struct mount_options& mo = client->mnt_options;
     const std::string url_str = mo.get_url_str();
 
+    int is_auth_values_set = -1;
+
     AZLogDebug("Parsing NFS URL string: {}", url_str);
 
     struct nfs_url *url = nfs_parse_url_full(nfs_context, url_str.c_str());
@@ -33,6 +35,26 @@ bool nfs_connection::open()
     assert(mo.export_path == url->path);
 
     nfs_destroy_url(url);
+
+    if (mo.perform_auth) {
+        assert(!mo.export_path.empty());
+        assert(!mo.tenantid.empty());
+        assert(!mo.subscriptionid.empty());
+        assert(!mo.authtype.empty());
+
+        is_auth_values_set = nfs_set_auth_context(nfs_context, 
+                                               mo.export_path.c_str(), 
+                                               mo.tenantid.c_str(), 
+                                               mo.subscriptionid.c_str(),
+                                               mo.authtype.c_str());
+        if (is_auth_values_set != 0) {
+            AZLogError("Failed to set auth values in nfs context tenantid={} subid={} authtype={}",
+                        mo.tenantid.c_str(),
+                        mo.subscriptionid.c_str(),
+                        mo.authtype.c_str());
+            goto destroy_context;
+        }
+    }
 
     /*
      * Call libnfs for mounting the share.
