@@ -1216,25 +1216,14 @@ struct rename_rpc_task
         return newname;
     }
 
-    void clear_ino_found()
-    {
-        ino_found = false;
-    }
-
     void set_ino_to_be_deleted(fuse_ino_t ino_to_del)
     {
         ino_to_be_deleted = ino_to_del;
-        ino_found = true;
     }
 
     fuse_ino_t get_ino_to_be_deleted() const
     {
         return ino_to_be_deleted;
-    }
-
-    bool is_ino_found() const
-    {
-        return ino_found;
     }
 
     /*
@@ -1307,7 +1296,6 @@ private:
      * This is the inode which will go out of scope once the rename
      * operation completes.
      */
-    bool ino_found;
     fuse_ino_t ino_to_be_deleted;
     
     char *name;
@@ -2125,6 +2113,7 @@ public:
                      const char *name,
                      fuse_ino_t newparent_ino,
                      const char *newname,
+                     fuse_ino_t ino_to_mark_deleted = 0,
                      bool silly_rename = false,
                      fuse_ino_t silly_rename_ino = 0,
                      fuse_ino_t oldparent_ino = 0,

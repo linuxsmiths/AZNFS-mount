@@ -528,6 +528,7 @@ void rpc_task::init_rename(fuse_req *request,
                            const char *name,
                            fuse_ino_t newparent_ino,
                            const char *newname,
+                           fuse_ino_t ino_to_mark_deleted,
                            bool silly_rename,
                            fuse_ino_t silly_rename_ino,
                            fuse_ino_t oldparent_ino,
@@ -551,7 +552,8 @@ void rpc_task::init_rename(fuse_req *request,
     rpc_api->rename_task.set_silly_rename_ino(silly_rename_ino);
     rpc_api->rename_task.set_oldparent_ino(oldparent_ino);
     rpc_api->rename_task.set_oldname(old_name);
-    rpc_api->rename_task.clear_ino_found();
+    rpc_api->rename_task.set_ino_to_be_deleted(ino_to_mark_deleted);
+
 
     /*
      * In case of cross-dir rename, we have to choose between
@@ -1680,12 +1682,6 @@ void rename_callback(
             silly_rename_inode->is_silly_renamed = true;
 
             /*
-             * We should no longer be able to get new fds to this inode,
-             * hence mark it deleted.
-             */
-            silly_rename_inode->is_deleted = true;
-
-            /*
              * Successfully (silly)renamed, hold a ref on the parent directory
              * inode so that it doesn't go away until we have deleted the
              * silly-renamed file. This ref is dropped in unlink_callback().
@@ -1718,16 +1714,6 @@ void rename_callback(
     } else {
         if (status == 0) {
             /*
-             * Now that the file is renamed, the old inode should no longer
-             * be accessible to new open call, hence mark it deleted.
-             */
-            if (!silly_rename && task->rpc_api->rename_task.is_ino_found()) {
-                task->get_client()->get_nfs_inode_from_ino(
-                    task->rpc_api->rename_task.get_ino_to_be_deleted())->is_deleted
-                    = true;
-            }
-
-            /*
              * We cannot use UPDATE_INODE_WCC() here as we cannot update our
              * readdir cache with the newly created file/dir, as the readdir
              * cache also needs the cookie to be filled which only server can
@@ -1755,6 +1741,20 @@ void rename_callback(
              * For #3 we will need to issue the actual user requested rename,
              * and we will respond to fuse when that complete.
              */
+            const fuse_ino_t ino_to_del =
+                task->rpc_api->rename_task.get_ino_to_be_deleted();
+            if (ino_to_del){
+                struct nfs_inode *inode_to_mark_del =
+                    client->get_nfs_inode_from_ino(ino_to_del);
+
+                /*
+                 * Now that the file is renamed, the old inode should no
+                 * longer be accessible to new open call, hence mark it
+                 * deleted.
+                 */
+                inode_to_mark_del->is_deleted = true;
+            }
+
             task->reply_error(status);
         } else {
             if (status != 0) {
@@ -1794,7 +1794,8 @@ void rename_callback(
                     task->rpc_api->rename_task.get_oldparent_ino(),
                     task->rpc_api->rename_task.get_oldname(),
                     parent_ino,
-                    task->rpc_api->rename_task.get_name());
+                    task->rpc_api->rename_task.get_name(),
+                    task->rpc_api->rename_task.get_ino_to_be_deleted());
 
                 rename_tsk->run_rename();
 

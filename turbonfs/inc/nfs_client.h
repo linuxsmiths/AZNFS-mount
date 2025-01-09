@@ -455,6 +455,7 @@ public:
         const char *name,
         fuse_ino_t newparent_ino,
         const char *new_name,
+        fuse_ino_t ino_to_mark_deleted = 0,
         bool silly_rename = false,
         fuse_ino_t silly_rename_ino = 0,
         fuse_ino_t oldparent_ino = 0,

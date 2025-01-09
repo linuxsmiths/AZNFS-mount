@@ -1233,9 +1233,18 @@ bool nfs_client::silly_rename(
          */
         inode->opencnt++;
 
-        rename(req, parent_ino, name, parent_ino, newname,
-               true /* silly_rename */, inode->get_fuse_ino(),
-               oldparent_ino, old_name);
+        if (rename_triggered_silly_rename) {
+            rename(req, parent_ino, name, parent_ino, newname,
+                   inode->get_fuse_ino(),
+                   true /* silly_rename */, inode->get_fuse_ino(),
+                   oldparent_ino, old_name);
+        }
+        else {
+            rename(req, parent_ino, name, parent_ino, newname,
+                0 /* ino_to_mark_deleted */,
+                true /* silly_rename */, inode->get_fuse_ino(),
+                oldparent_ino, old_name);
+        }
 
         return true;
     } else if (!inode) {
@@ -1328,6 +1337,7 @@ void nfs_client::rename(
     const char *name,
     fuse_ino_t newparent_ino,
     const char *new_name,
+    fuse_ino_t ino_to_mark_deleted,
     bool silly_rename,
     fuse_ino_t silly_rename_ino,
     fuse_ino_t oldparent_ino,
@@ -1359,21 +1369,8 @@ void nfs_client::rename(
     }
 
     tsk->init_rename(req, parent_ino, name, newparent_ino, new_name,
-                     silly_rename, silly_rename_ino, oldparent_ino, old_name);
-
-    if (!silly_rename)
-    {
-        /*
-         * If this is a client initiated rename, set the inode that will
-         * be marked deleted once the rename completes.
-         * This will be the inode of the destination if it exists.
-         */
-        struct nfs_inode *inode = newparent_inode->lookup(new_name);
-        if (inode) {
-            tsk->rpc_api->rename_task.set_ino_to_be_deleted(inode->get_fuse_ino());
-        }
-    }
-
+                     ino_to_mark_deleted, silly_rename, silly_rename_ino,
+                     oldparent_ino, old_name);
     tsk->run_rename();
 }
 
