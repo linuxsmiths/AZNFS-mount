@@ -31,6 +31,11 @@ struct mount_options
     // Same as mount_port.
     const int nfs_port;
 
+    /*
+     * Option to use transport security (TLS), it takes following values:
+     * tls: to use encryption.
+     * none: to not use encryption.
+     */
     const std::string xprtsec;
 
     /*

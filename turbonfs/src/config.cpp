@@ -306,7 +306,7 @@ void aznfsc_cfg::set_defaults_and_sanitize()
     if (cloud_suffix == nullptr)
         cloud_suffix = ::strdup("blob.core.windows.net");
 
-    if(xprtsec == nullptr)
+    if (xprtsec == nullptr)
         xprtsec = ::strdup("none");
 
     assert(account != nullptr);
