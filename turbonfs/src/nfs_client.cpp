@@ -84,8 +84,15 @@ auth_token_cb_res* get_auth_token_and_setargs_cb(struct auth_context* auth) {
                         expirytime);
         }
 
-        nfs_set_azauth_authdata(cb_res, strdup(authdataString.c_str()));
-        nfs_set_azauth_expirytime(cb_res, expirytime);
+
+        // Set auth_data in auth_token_cb_res
+        assert(authdataString.c_str());
+        cb_res->azauth_data = strdup(authdataString.c_str());
+
+        // Set expirytime in auth_token_cb_res
+        assert(expirytime != 0);
+        assert(expirytime >= static_cast<uint64_t>(time(NULL)));
+        cb_res->expiry_time = expirytime;
 
         return cb_res;
 }
