@@ -4,9 +4,6 @@
 #include "rpc_task.h"
 #include "rpc_readdir.h"
 
-#include "rpc_task.h"
-#include "rpc_readdir.h"
-
 #include <azure/identity/azure_cli_credential.hpp>
 #include <azure/core/datetime.hpp>
 #include <nlohmann/json.hpp>
@@ -27,33 +24,27 @@ using json = nlohmann::json;
  * @return Pointer to an `auth_token_cb_res` structure with authentication details, 
  */    
 auth_token_cb_res* get_auth_token_and_setargs_cb(struct auth_context* auth) {
+
     if (!auth) {
         printf("Invalid auth_context received.\n");
         return nullptr;
     }
 
         // Allocate response structure
-        auth_token_cb_res* cb_res = (auth_token_cb_res*)malloc(sizeof(AZAUTH3args) + sizeof(uint64_t));
+        auth_token_cb_res* cb_res = (auth_token_cb_res*)malloc(sizeof(auth_token_cb_res));
         if (!cb_res) {
             AZLogError("Failed to allocate memory for auth_token_cb_res.\n");
             return nullptr;
         }
 
-        AZAUTH3args* azauthargs = new AZAUTH3args();
-
-        // Log user details
-        AZLogDebug(" tenantid {}, subid: {}, exportpath {} authtype: {}", 
+        AZLogDebug("get_auth_token_and_setargs_cb: tenantid: {} subscriptionid: {}", 
                    nfs_get_tenantid(auth),
-                   nfs_get_subscriptionid(auth),
-                   nfs_get_exportpath(auth),
-                   nfs_get_authtype(auth));
+                   nfs_get_subscriptionid(auth));
 
         assert(nfs_get_tenantid(auth));
-        assert(nfs_get_subscriptionid(auth));
-        assert(nfs_get_exportpath(auth));
-        assert(nfs_get_authtype(auth));
 
         Azure::Core::Credentials::AccessToken token;
+
         try {
             // Create Azure Token Request Context
             Azure::Core::Credentials::TokenRequestContext tokenRequestContext;
@@ -73,18 +64,18 @@ auth_token_cb_res* get_auth_token_and_setargs_cb(struct auth_context* auth) {
 
         uint64_t expirytime = Azure::Core::_internal::PosixTimeConverter::DateTimeToPosixTime(token.ExpiresOn);
 
-        // Prepare JSON object: authdata. 
-        json jsonObject = {
+        // Prepare the authdata object. 
+        json authdataObject = {
             {"AuthToken", token.Token},
             {"SubscriptionId", nfs_get_subscriptionid(auth)},
             {"TenantId", nfs_get_tenantid(auth)},
             {"AuthorizedTill", std::to_string(expirytime)}
         };
 
-        // Convert JSON object to string
-        std::string jsonString = jsonObject.dump();
+        // Convert authdata object to string
+        std::string authdataString = authdataObject.dump();
 
-        if (jsonString.empty())
+        if (authdataString.empty())
         {
             AZLogError("Unable to create jsonObject with token related information token:{} SubscriptionID:{} TenantID:{} AuthorizedTill:{}",
                         token.Token,
@@ -93,77 +84,10 @@ auth_token_cb_res* get_auth_token_and_setargs_cb(struct auth_context* auth) {
                         expirytime);
         }
 
-        // Assign data to AZAUTH3args
-        azauthargs->authdata = strdup(jsonString.c_str());
-        azauthargs->client_version = strdup("123456789012345");
-
-        azauthargs->clientid.clientid_len = strlen("12345678");
-        azauthargs->clientid.clientid_val = strdup("12345678");
-
-        azauthargs->authtype = strdup(nfs_get_authtype(auth));
-        azauthargs->authtarget = strdup(nfs_get_exportpath(auth));
-
-        nfs_set_azauth_azauthargs(cb_res, azauthargs);
+        nfs_set_azauth_authdata(cb_res, strdup(authdataString.c_str()));
         nfs_set_azauth_expirytime(cb_res, expirytime);
 
-        AZLogInfo("rpc_nfs3azauth args: authdata: {}, client_version: {}, authtype: {}", 
-                  azauthargs->authdata, azauthargs->client_version, azauthargs->authtype);
-
         return cb_res;
-}
-
-/*
- * Generates an authentication token, sets the necessary arguments, 
- *        and returns a response structure.
- * 
- * This function retrieves authentication context details, requests an access token 
- * from Azure CLI, and prepares a response structure containing the token and other 
- * metadata required for authentication. The response is formatted as an `auth_token_cb_res` object.
- * 
- * @param auth Pointer to the authentication context structure containing user details.
- * @return Pointer to an `auth_token_cb_res` structure with authentication details, 
- */   
-void put_auth_token_and_freeargs_cb(struct auth_token_cb_res *res) {
-    if (!res) {
-        return; // Nothing to free if res is nullptr.
-    }
-
-    struct auth_token_cb_res* cb_res = res;
-
-    // Free the nested AZAUTH3args structure if it exists
-    if (res->args) {
-        AZAUTH3args *args = cb_res->args;
-
-        // Free client_version
-        if (args->client_version) {
-            free(args->client_version);
-        }
-
-        // Free clientid_val
-        if (args->clientid.clientid_val) {
-            free(args->clientid.clientid_val);
-        }
-
-        // Free authtype
-        if (args->authtype) {
-            free(args->authtype);
-        }
-
-        // Free authtarget
-        if (args->authtarget) {
-            free(args->authtarget);
-        }
-
-        // Free authdata
-        if (args->authdata) {
-            free(args->authdata);
-        }
-        // Delete the AZAUTH3args structure itself.
-        delete args;
-    }
-
-    // Free the auth_token_cb_res structure.
-    free(cb_res);
 }
 
 // The user should first init the client class before using it.
@@ -173,7 +97,7 @@ bool nfs_client::init()
     assert(root_fh == nullptr);
 
     // Set the auth token callback for this connection.
-    set_auth_token_callback(get_auth_token_and_setargs_cb, put_auth_token_and_freeargs_cb);
+    set_auth_token_callback(get_auth_token_and_setargs_cb);
 
     /*
      * Setup RPC transport.

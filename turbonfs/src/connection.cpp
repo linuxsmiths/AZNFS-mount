@@ -37,16 +37,25 @@ bool nfs_connection::open()
     nfs_destroy_url(url);
 
     if (mo.perform_auth) {
+
+        // TODO: Update these strings.
+        std::string client_version = "123456789012345";
+        std::string client_id= "12345678";
+
         assert(!mo.export_path.empty());
         assert(!mo.tenantid.empty());
         assert(!mo.subscriptionid.empty());
         assert(!mo.authtype.empty());
+        assert(!client_version.empty());
+        assert(!client_id.empty());
 
         is_auth_values_set = nfs_set_auth_context(nfs_context, 
                                                mo.export_path.c_str(), 
                                                mo.tenantid.c_str(), 
                                                mo.subscriptionid.c_str(),
-                                               mo.authtype.c_str());
+                                               mo.authtype.c_str(),
+                                               client_version.c_str(),
+                                               client_id.c_str());
         if (is_auth_values_set != 0) {
             AZLogError("Failed to set auth values in nfs context tenantid={} subid={} authtype={}",
                         mo.tenantid.c_str(),
