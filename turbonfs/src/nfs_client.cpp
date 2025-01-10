@@ -360,7 +360,8 @@ void nfs_client::jukebox_runner()
                               js->rpc_api->rmdir_task.get_dir_name());
                     rmdir(js->rpc_api->req,
                           js->rpc_api->rmdir_task.get_parent_ino(),
-                          js->rpc_api->rmdir_task.get_dir_name());
+                          js->rpc_api->rmdir_task.get_dir_name(),
+                          js->rpc_api->rmdir_task.get_ino());
                     break;
                 case FUSE_UNLINK:
                     AZLogWarn("[JUKEBOX REISSUE] unlink(req={}, parent_ino={}, "
@@ -372,6 +373,7 @@ void nfs_client::jukebox_runner()
                     unlink(js->rpc_api->req,
                            js->rpc_api->unlink_task.get_parent_ino(),
                            js->rpc_api->unlink_task.get_file_name(),
+                           js->rpc_api->unlink_task.get_ino(),
                            js->rpc_api->unlink_task.get_for_silly_rename());
                     break;
                 case FUSE_SYMLINK:
@@ -1281,25 +1283,24 @@ void nfs_client::unlink(
     fuse_req_t req,
     fuse_ino_t parent_ino,
     const char* name,
+    fuse_ino_t ino,
     bool for_silly_rename)
 {
     struct rpc_task *tsk = rpc_task_helper->alloc_rpc_task(FUSE_UNLINK);
-    struct nfs_inode *parent_inode = get_nfs_inode_from_ino(parent_ino);
-    struct nfs_inode *inode = parent_inode->lookup(name);
 
-    tsk->init_unlink(req, parent_ino, name, inode->get_fuse_ino(),
-                     for_silly_rename);
+    tsk->init_unlink(req, parent_ino, name, ino, for_silly_rename);
     tsk->run_unlink();
 }
 
 void nfs_client::rmdir(
     fuse_req_t req,
     fuse_ino_t parent_ino,
-    const char* name)
+    const char* name,
+    fuse_ino_t ino)
 {
     struct rpc_task *tsk = rpc_task_helper->alloc_rpc_task(FUSE_RMDIR);
     struct nfs_inode *parent_inode = get_nfs_inode_from_ino(parent_ino);
-    struct nfs_inode *inode = parent_inode->lookup(name);
+    struct nfs_inode *inode = get_nfs_inode_from_ino(ino);
 
     if (parent_inode->has_dircache()) {
         parent_inode->get_dircache()->dnlc_remove(name);
@@ -1310,7 +1311,7 @@ void nfs_client::rmdir(
         inode->invalidate_attribute_cache();
     }
 
-    tsk->init_rmdir(req, parent_ino, name, inode->get_fuse_ino());
+    tsk->init_rmdir(req, parent_ino, name, ino);
     tsk->run_rmdir();
 }
 

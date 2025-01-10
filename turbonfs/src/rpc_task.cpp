@@ -1449,14 +1449,22 @@ void unlink_callback(
                 UPDATE_INODE_ATTR(parent_inode, res->REMOVE3res_u.resok.dir_wcc.after);
             }
 
-	    // Now that the file is deleted, mark the inode as deleted.
-	    const fuse_ino_t ino = task->rpc_api->unlink_task.get_ino();
-	    struct nfs_inode *inode =
-		    task->get_client()->get_nfs_inode_from_ino(ino);
-	    assert (inode != nullptr);
-	    AZLogDebug("Marking inode {} as deleted", ino);
-	    inode->is_deleted = true;
-	}
+            // Now that the file is deleted, mark the inode as deleted.
+            const fuse_ino_t ino = task->rpc_api->unlink_task.get_ino();
+            if (ino) {
+                struct nfs_inode *inode =
+                    task->get_client()->get_nfs_inode_from_ino(ino);
+                assert (inode != nullptr);
+                AZLogDebug("Marking inode {} as deleted", ino);
+                inode->is_deleted = true;
+            } else {
+                /*
+                * This can happen if the file is being deleted for a silly rename
+                * scenario in which case we do not set the ino.
+                */
+                assert(for_silly_rename);
+            }
+        }
 
         if (task->get_fuse_req()) {
             task->reply_error(status);
@@ -1761,7 +1769,7 @@ void rename_callback(
                  * longer be accessible to new open call, hence mark it
                  * deleted.
                  */
-		AZLogDebug("Marking inode {} as deleted", ino_to_del);
+            AZLogDebug("Marking inode {} as deleted", ino_to_del);
                 inode_to_mark_del->is_deleted = true;
             }
 

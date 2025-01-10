@@ -154,6 +154,9 @@ static void aznfsc_ll_unlink(fuse_req_t req,
                fmt::ptr(req), parent_ino, name);
 
     struct nfs_client *client = get_nfs_client_from_fuse_req(req);
+    struct nfs_inode *parent_inode = client->get_nfs_inode_from_ino(parent_ino);
+    struct nfs_inode *inode = parent_inode->lookup(name);
+    const fuse_ino_t ino = inode ? inode->get_fuse_ino() : 0;
 
     /*
      * Call silly_rename() to see if it wants to silly rename instead of unlink.
@@ -167,7 +170,7 @@ static void aznfsc_ll_unlink(fuse_req_t req,
         return;
     }
 
-    client->unlink(req, parent_ino, name, false /* for_silly_rename */);
+    client->unlink(req, parent_ino, name, ino, false /* for_silly_rename */);
 }
 
 [[maybe_unused]]
@@ -181,7 +184,11 @@ static void aznfsc_ll_rmdir(fuse_req_t req,
                fmt::ptr(req), parent_ino, name);
 
     struct nfs_client *client = get_nfs_client_from_fuse_req(req);
-    client->rmdir(req, parent_ino, name);
+    struct nfs_inode *parent_inode = client->get_nfs_inode_from_ino(parent_ino);
+    struct nfs_inode *inode = parent_inode->lookup(name);
+    const fuse_ino_t ino = inode ? inode->get_fuse_ino() : 0;
+
+    client->rmdir(req, parent_ino, name, ino);
 }
 
 [[maybe_unused]]
