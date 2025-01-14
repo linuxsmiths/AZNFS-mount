@@ -21,7 +21,6 @@ bool nfs_connection::open()
     struct mount_options& mo = client->mnt_options;
     const std::string url_str = mo.get_url_str();
 
-
     AZLogDebug("Parsing NFS URL string: {}", url_str);
 
     struct nfs_url *url = nfs_parse_url_full(nfs_context, url_str.c_str());

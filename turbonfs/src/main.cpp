@@ -9,7 +9,6 @@
 
 using json = nlohmann::json;
 
-
 /*
  * Note: This file should only contain code needed for fuse interfacing.
  */
@@ -420,7 +419,6 @@ auth_token_cb_res* get_auth_token_and_setargs_cb(struct auth_context* auth) {
             free(cb_res);
             return nullptr;
         }
-
 
         // Set auth_data in auth_token_cb_res
         assert(authdataString.c_str());
