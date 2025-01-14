@@ -68,10 +68,9 @@ struct mount_options
 
     // readdir_maxcount adjusted as per server advertised value.
     int readdir_maxcount_adj = 0;
-
     
-    // To perform auth.
-    const bool perform_auth;
+    // Whether auth is required.
+    const bool auth;
 
     // Tenant id in which the account/container mounted lies. 
     const std::string tenantid;
@@ -80,7 +79,7 @@ struct mount_options
     const std::string subscriptionid;
 
     // AuthType: Currently we only support AzAuthAAD. 
-    const std::string authtype;
+    const std::string authtype = "AzAuthAAD";
 
     // Add any other options as needed.
 
@@ -107,10 +106,10 @@ struct mount_options
         actimeo(aznfsc_cfg.actimeo),
         readdir_maxcount(aznfsc_cfg.readdir_maxcount),
         readahead_kb(aznfsc_cfg.readahead_kb),
-        perform_auth(aznfsc_cfg.performauth),
+        auth(aznfsc_cfg.auth),
         tenantid(aznfsc_cfg.tenantid),
         subscriptionid(aznfsc_cfg.subscriptionid),
-        authtype(aznfsc_cfg.authtype)
+        authtype("AzAuthAAD")
     {
         assert(!server.empty());
         assert(!export_path.empty());
@@ -125,7 +124,7 @@ struct mount_options
     {
         std::string url(1024, '\0');
         // TODO: Take it from aznfsc_cfg.
-        const int debug = 5;
+        const int debug = 1;
 
         /*
          * For Blob NFS force nfsport and mountport to avoid portmapper

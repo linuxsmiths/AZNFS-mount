@@ -112,23 +112,22 @@ bool is_valid_consistency(const std::string& consistency)
 }
 
 static inline
+bool is_valid_guid(const std::string& guid)
+{
+    const std::regex rexpr("^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}");
+    return std::regex_match(guid, rexpr);
+}
+
+static inline
 bool is_valid_tenantid(const std::string& tenantid)
 {
-    const std::regex rexpr("^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$");
-    return std::regex_match(tenantid, rexpr);
+    return is_valid_guid(tenantid);
 }
 
 static inline
 bool is_valid_subscriptionid(const std::string& subscriptionid)
 {
-    const std::regex rexpr("^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$");
-    return std::regex_match(subscriptionid, rexpr);
-}
-
-static inline
-bool is_valid_authtype(const std::string& authtype)
-{
-    return (authtype == "AzAuthAAD");
+    return is_valid_guid(subscriptionid);
 }
 
 /**

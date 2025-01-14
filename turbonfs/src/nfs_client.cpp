@@ -4,98 +4,8 @@
 #include "rpc_task.h"
 #include "rpc_readdir.h"
 
-#include <azure/identity/azure_cli_credential.hpp>
-#include <azure/core/datetime.hpp>
-#include <nlohmann/json.hpp>
-
 #define NFS_STATUS(r) ((r) ? (r)->status : NFS3ERR_SERVERFAULT)
 
-using json = nlohmann::json;
-
-/*
- *  Generates an authentication token, sets the necessary arguments, 
- *        and returns a response structure.
- * 
- * This function retrieves authentication context details, requests an access token 
- * from Azure CLI, and prepares a response structure containing the token and other 
- * metadata required for authentication. The response is formatted as an `auth_token_cb_res` object.
- * 
- * @param auth Pointer to the authentication context structure containing user details.
- * @return Pointer to an `auth_token_cb_res` structure with authentication details, 
- */    
-auth_token_cb_res* get_auth_token_and_setargs_cb(struct auth_context* auth) {
-
-    if (!auth) {
-        printf("Invalid auth_context received.\n");
-        return nullptr;
-    }
-
-        // Allocate response structure
-        auth_token_cb_res* cb_res = (auth_token_cb_res*)malloc(sizeof(auth_token_cb_res));
-        if (!cb_res) {
-            AZLogError("Failed to allocate memory for auth_token_cb_res.\n");
-            return nullptr;
-        }
-
-        AZLogDebug("get_auth_token_and_setargs_cb: tenantid: {} subscriptionid: {}", 
-                   nfs_get_tenantid(auth),
-                   nfs_get_subscriptionid(auth));
-
-        assert(nfs_get_tenantid(auth));
-
-        Azure::Core::Credentials::AccessToken token;
-
-        try {
-            // Create Azure Token Request Context
-            Azure::Core::Credentials::TokenRequestContext tokenRequestContext;
-            tokenRequestContext.Scopes = { "https://storage.azure.com/.default" };
-            tokenRequestContext.TenantId = nfs_get_tenantid(auth);
-
-            Azure::Identity::AzureCliCredentialOptions options;
-            options.TenantId = nfs_get_tenantid(auth);
-            Azure::Identity::AzureCliCredential azcli(options);
-
-            token = azcli.GetToken(tokenRequestContext, Azure::Core::Context());
-
-        } catch (const Azure::Core::RequestFailedException& e) {
-            AZLogError("Status Code: {} Reason Phrase: {}", static_cast<int>(e.StatusCode), e.ReasonPhrase.c_str());
-            return nullptr;
-        }
-
-        uint64_t expirytime = Azure::Core::_internal::PosixTimeConverter::DateTimeToPosixTime(token.ExpiresOn);
-
-        // Prepare the authdata object. 
-        json authdataObject = {
-            {"AuthToken", token.Token},
-            {"SubscriptionId", nfs_get_subscriptionid(auth)},
-            {"TenantId", nfs_get_tenantid(auth)},
-            {"AuthorizedTill", std::to_string(expirytime)}
-        };
-
-        // Convert authdata object to string
-        std::string authdataString = authdataObject.dump();
-
-        if (authdataString.empty())
-        {
-            AZLogError("Unable to create jsonObject with token related information token:{} SubscriptionID:{} TenantID:{} AuthorizedTill:{}",
-                        token.Token,
-                        nfs_get_subscriptionid(auth),
-                        nfs_get_tenantid(auth),
-                        expirytime);
-        }
-
-
-        // Set auth_data in auth_token_cb_res
-        assert(authdataString.c_str());
-        cb_res->azauth_data = strdup(authdataString.c_str());
-
-        // Set expirytime in auth_token_cb_res
-        assert(expirytime != 0);
-        assert(expirytime >= static_cast<uint64_t>(time(NULL)));
-        cb_res->expiry_time = expirytime;
-
-        return cb_res;
-}
 
 // The user should first init the client class before using it.
 bool nfs_client::init()
@@ -103,8 +13,6 @@ bool nfs_client::init()
     // init() must be called only once.
     assert(root_fh == nullptr);
 
-    // Set the auth token callback for this connection.
-    set_auth_token_callback(get_auth_token_and_setargs_cb);
 
     /*
      * Setup RPC transport.

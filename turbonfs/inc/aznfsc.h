@@ -161,7 +161,7 @@ typedef struct aznfsc_cfg
      * Whether auth should be performed. If this is set to true, tenant id, 
      * subscription id and authtype should be set. 
      */
-    bool performauth = false;
+    bool auth = false;
 
     /*
      * Tenant id for which the token needs to be fetched. 
@@ -172,11 +172,6 @@ typedef struct aznfsc_cfg
      * Subscription id in which the account/container lies. 
      */
     const char *subscriptionid = nullptr;
-
-    /*
-     * Auth type to be used. Currently we only support AzAuthAAD.
-     */
-    const char *authtype = nullptr;
 
     /**********************************************************************
      **                          Mount options                           **

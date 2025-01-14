@@ -972,6 +972,9 @@ aznfsclient_mount()
     if [ $read_status -gt 128 ]; then
         eecho "Mount timed out, check for details!"
         return $read_status
+    elif [ "$mount_status" == "2"]; then
+        eecho "Please perform 'az login' and then try to mount again!"
+        return 1
     elif [ "$mount_status" != "0" ]; then
         return 1
     else
