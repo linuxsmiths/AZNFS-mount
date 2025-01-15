@@ -15,7 +15,7 @@ port: 2047
 #
 auth: true
 tenantid: ad304624-d4a2-4f1e-8f5f-9b8ba34e22f9
-subscriptionid: 7bb33dc9-b004-4fb6-96af-df9bcc1c222c
+subscriptionid: 7bb33dc9-b004-4fb6-96af-df9bcc1c222b
 
 #
 # NFS mount options
