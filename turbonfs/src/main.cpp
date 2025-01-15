@@ -28,8 +28,9 @@ struct fuse_conn_info_opts* fuse_conn_info_opts_ptr;
  */
 #define AZNFSC_OPT(templ, key) { templ, offsetof(struct aznfsc_cfg, key), 0}
 
-// Has the user performed az login.
-bool is_azlogin = true; 
+// Is 'az login' required.
+// It becomes true when login is required but user has not performed the same.
+bool is_azlogin_required = false; 
 
 // LogFile for this mount.
 const string optdirdata = "/opt/microsoft/aznfs/data";
@@ -351,85 +352,92 @@ static std::string get_logdir()
  * @param auth Pointer to the authentication context structure containing user details.
  * @return Pointer to an `auth_token_cb_res` structure with authentication details, 
  */    
-auth_token_cb_res* get_auth_token_and_setargs_cb(struct auth_context* auth) {
-
+auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth) 
+{
     if (!auth) {
-        AZLogError("Invalid auth_context received.\n");
+        AZLogError("Null auth_context received");
+        assert(0);
         return nullptr;
     }
 
-        // Allocate response structure
-        auth_token_cb_res* cb_res = (auth_token_cb_res*)malloc(sizeof(auth_token_cb_res));
-        if (!cb_res) {
-            AZLogError("Failed to allocate memory for auth_token_cb_res.\n");
-            return nullptr;
-        }
+    // is_azlogin_required should be false when we enter this function.
+    assert(is_azlogin_required == false);
 
-        AZLogDebug("get_auth_token_and_setargs_cb: tenantid: {} subscriptionid: {}", 
+    // Allocate response structure
+    auth_token_cb_res *cb_res = (auth_token_cb_res *) malloc(sizeof(auth_token_cb_res));    
+    if (!cb_res) {
+        AZLogError("Failed to allocate memory for auth_token_cb_res.");
+        return nullptr;
+    }
+
+    AZLogDebug("get_auth_token_and_setargs_cb: tenantid: {} subscriptionid: {}", 
+                nfs_get_tenantid(auth),
+                nfs_get_subscriptionid(auth));
+
+    assert(nfs_get_tenantid(auth));
+
+    Azure::Core::Credentials::AccessToken token;
+
+    try {
+        // Create Azure Token Request Context
+        Azure::Core::Credentials::TokenRequestContext tokenRequestContext;
+        tokenRequestContext.Scopes = { "https://storage.azure.com/.default" };
+
+        Azure::Identity::AzureCliCredentialOptions options;
+        Azure::Identity::AzureCliCredential azcli(options);
+
+        token = azcli.GetToken(tokenRequestContext, Azure::Core::Context());
+    } 
+    // Special exception handled when user has not logged in. 
+    catch (const Azure::Core::Credentials::AuthenticationException& e) {
+        AZLogError("Error in getting the token: AuthenticationException thrown, "
+                   "Reason Phrase: {}, setting is_azlogin_required=false", 
+                   e.what());
+        // User is required to perform 'az login'.
+        is_azlogin_required = true;
+        free(cb_res);
+        return nullptr;
+    }
+    catch (std::exception const& e) {
+        AZLogError("Error in getting the token: Reason Phrase: {}", e.what());
+        free(cb_res);
+        return nullptr;
+    }
+
+    uint64_t expirytime = Azure::Core::_internal::PosixTimeConverter::DateTimeToPosixTime(token.ExpiresOn);
+
+    // Prepare the authdata object. 
+    json authdataObject = {
+        {"AuthToken", token.Token},
+        {"SubscriptionId", nfs_get_subscriptionid(auth)},
+        {"TenantId", nfs_get_tenantid(auth)},
+        {"AuthorizedTill", std::to_string(expirytime)}
+    };
+
+    // Convert authdata object to string
+    std::string authdataString = authdataObject.dump();
+
+    if (authdataString.empty()) {
+        AZLogError("Unable to create jsonObject with token related information "
+                   "token:{} SubscriptionID:{} TenantID:{} AuthorizedTill:{}",
+                   token.Token,
+                   nfs_get_subscriptionid(auth),
                    nfs_get_tenantid(auth),
-                   nfs_get_subscriptionid(auth));
+                   expirytime);
+        free(cb_res);
+        return nullptr;
+    }
 
-        assert(nfs_get_tenantid(auth));
+    // Set auth_data in auth_token_cb_res
+    assert(authdataString.c_str());
+    cb_res->azauth_data = strdup(authdataString.c_str());
 
-        Azure::Core::Credentials::AccessToken token;
+    // Set expirytime in auth_token_cb_res
+    assert(expirytime != 0);
+    assert(expirytime >= static_cast<uint64_t>(time(NULL)));
+    cb_res->expiry_time = expirytime;
 
-        try {
-            // Create Azure Token Request Context
-            Azure::Core::Credentials::TokenRequestContext tokenRequestContext;
-            tokenRequestContext.Scopes = { "https://storage.azure.com/.default" };
-
-            Azure::Identity::AzureCliCredentialOptions options;
-            Azure::Identity::AzureCliCredential azcli(options);
-
-            token = azcli.GetToken(tokenRequestContext, Azure::Core::Context());
-        
-        } 
-        // Special exception handled when user has not logged in. 
-        catch (const Azure::Core::Credentials::AuthenticationException& e) {
-            AZLogError("Error in getting the token: AuthenticationException thrown, Reason Phrase: {}, setting is_azlogin=false", e.what());
-            is_azlogin = false;
-            free(cb_res);
-            return nullptr;
-        }
-        catch (std::exception const& e) {
-            AZLogError("Error in getting the token: Reason Phrase: {}", e.what());
-            free(cb_res);
-            return nullptr;
-        }
-
-        uint64_t expirytime = Azure::Core::_internal::PosixTimeConverter::DateTimeToPosixTime(token.ExpiresOn);
-
-        // Prepare the authdata object. 
-        json authdataObject = {
-            {"AuthToken", token.Token},
-            {"SubscriptionId", nfs_get_subscriptionid(auth)},
-            {"TenantId", nfs_get_tenantid(auth)},
-            {"AuthorizedTill", std::to_string(expirytime)}
-        };
-
-        // Convert authdata object to string
-        std::string authdataString = authdataObject.dump();
-
-        if (authdataString.empty()) {
-            AZLogError("Unable to create jsonObject with token related information token:{} SubscriptionID:{} TenantID:{} AuthorizedTill:{}",
-                        token.Token,
-                        nfs_get_subscriptionid(auth),
-                        nfs_get_tenantid(auth),
-                        expirytime);
-            free(cb_res);
-            return nullptr;
-        }
-
-        // Set auth_data in auth_token_cb_res
-        assert(authdataString.c_str());
-        cb_res->azauth_data = strdup(authdataString.c_str());
-
-        // Set expirytime in auth_token_cb_res
-        assert(expirytime != 0);
-        assert(expirytime >= static_cast<uint64_t>(time(NULL)));
-        cb_res->expiry_time = expirytime;
-
-        return cb_res;
+    return cb_res;
 }
 
 int main(int argc, char *argv[])
@@ -674,9 +682,9 @@ err_out0:
         if (!pipe.is_open()) {
             AZLogError("Aznfsclient unable to send mount status on pipe.");
         } else {
-            // If is_azlogin is false, share the error code = 2 over the pipe.
-            if (is_azlogin == false) {
-                ret = 2;
+            // If is_azlogin_required is false, share the error code = -2 over the pipe.
+            if (is_azlogin_required) {
+                ret = -2;
                 AZLogError("Not logged in using 'az login' when auth is enabled");
             }
             // TODO: Extend this with meaningful error codes.

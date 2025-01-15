@@ -119,7 +119,7 @@ do { \
         _CHECK_STR(lookupcache);
         _CHECK_STR(consistency);
         
-        _CHECK_BOOL(auth)
+        _CHECK_BOOL(auth);
         if (auth) {
             _CHECK_STR(tenantid);
             _CHECK_STR(subscriptionid);
@@ -324,8 +324,10 @@ void aznfsc_cfg::set_defaults_and_sanitize()
     AZLogDebug("inject_err_prob_pct_def = {}", inject_err_prob_pct_def);
 #endif
     AZLogDebug("auth = {}", auth);
-    AZLogDebug("tenantid = {}", tenantid);
-    AZLogDebug("subscriptionid = {}", subscriptionid);
+    if (auth) {
+        AZLogDebug("tenantid = {}", tenantid);
+        AZLogDebug("subscriptionid = {}", subscriptionid);
+    }
     AZLogDebug("port = {}", port);
     AZLogDebug("nconnect = {}", nconnect);
     AZLogDebug("rsize = {}", rsize);

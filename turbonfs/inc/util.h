@@ -114,7 +114,7 @@ bool is_valid_consistency(const std::string& consistency)
 static inline
 bool is_valid_guid(const std::string& guid)
 {
-    const std::regex rexpr("^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}");
+    const std::regex rexpr("^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$");
     return std::regex_match(guid, rexpr);
 }
 

@@ -107,13 +107,14 @@ struct mount_options
         readdir_maxcount(aznfsc_cfg.readdir_maxcount),
         readahead_kb(aznfsc_cfg.readahead_kb),
         auth(aznfsc_cfg.auth),
-        tenantid(aznfsc_cfg.tenantid),
-        subscriptionid(aznfsc_cfg.subscriptionid),
-        authtype("AzAuthAAD")
+        tenantid(aznfsc_cfg.tenantid ? aznfsc_cfg.tenantid : ""),
+        subscriptionid(aznfsc_cfg.subscriptionid ? aznfsc_cfg.subscriptionid : "")
     {
         assert(!server.empty());
         assert(!export_path.empty());
         assert(!mountpoint.empty());
+        assert(tenantid.empty() == !auth);
+        assert(subscriptionid.empty() == !auth);
     }
 
     /**
