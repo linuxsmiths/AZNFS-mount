@@ -29,7 +29,7 @@ struct fuse_conn_info_opts* fuse_conn_info_opts_ptr;
 #define AZNFSC_OPT(templ, key) { templ, offsetof(struct aznfsc_cfg, key), 0}
 
 // Is 'az login' required?
-// It is set when the user is enabled auth in config but they have not 'az login'.
+// It is set when the user is enabled auth in config but they have not done 'az login'.
 bool is_azlogin_required = false; 
 
 // LogFile for this mount.
