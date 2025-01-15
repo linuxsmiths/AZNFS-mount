@@ -372,6 +372,7 @@ void nfs_client::jukebox_runner()
                     unlink(js->rpc_api->req,
                            js->rpc_api->unlink_task.get_parent_ino(),
                            js->rpc_api->unlink_task.get_file_name(),
+                           js->rpc_api->unlink_task.get_ino(),
                            js->rpc_api->unlink_task.get_for_silly_rename());
                     break;
                 case FUSE_SYMLINK:
@@ -1271,11 +1272,12 @@ void nfs_client::unlink(
     fuse_req_t req,
     fuse_ino_t parent_ino,
     const char* name,
+    fuse_ino_t ino,
     bool for_silly_rename)
 {
     struct rpc_task *tsk = rpc_task_helper->alloc_rpc_task(FUSE_UNLINK);
 
-    tsk->init_unlink(req, parent_ino, name, for_silly_rename);
+    tsk->init_unlink(req, parent_ino, name, ino, for_silly_rename);
     tsk->run_unlink();
 }
 

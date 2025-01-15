@@ -155,6 +155,10 @@ static void aznfsc_ll_unlink(fuse_req_t req,
 
     struct nfs_client *client = get_nfs_client_from_fuse_req(req);
 
+    struct nfs_inode *parent_inode = client->get_nfs_inode_from_ino(parent_ino);
+    struct nfs_inode *inode = parent_inode->lookup(name);
+    const fuse_ino_t ino = inode ? inode->get_fuse_ino() : 0;
+
     /*
      * Call silly_rename() to see if it wants to silly rename instead of unlink.
      * We will perform silly rename if the opencnt of the file is not 0, i.e.,
@@ -167,7 +171,7 @@ static void aznfsc_ll_unlink(fuse_req_t req,
         return;
     }
 
-    client->unlink(req, parent_ino, name, false /* for_silly_rename */);
+    client->unlink(req, parent_ino, name, ino, false /* for_silly_rename */);
 }
 
 [[maybe_unused]]
@@ -444,7 +448,11 @@ static void aznfsc_ll_flush(fuse_req_t req,
 
     AZLogDebug("aznfsc_ll_flush(req={}, ino={}, fi={})",
                fmt::ptr(req), ino, fmt::ptr(fi));
-
+#if 0
+    fuse_reply_err(req, 0);
+    DEC_GBL_STATS(fuse_responses_awaited, 1);
+return;
+#endif
     struct nfs_client *client = get_nfs_client_from_fuse_req(req);
     client->flush(req, ino);
 }
@@ -478,6 +486,8 @@ static void aznfsc_ll_release(fuse_req_t req,
      * as the file is going to be unlinked anyways.
      */
     if (!inode->release(req)) {
+        //AZLogDebug("sleeping in release ino:{}", ino);
+        //::sleep(5);
         client->flush(req, ino);
     }
 }

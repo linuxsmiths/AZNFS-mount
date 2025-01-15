@@ -921,6 +921,49 @@ void nfs_inode::flush_unlock() const
     flush_cv.notify_one();
 }
 
+/*
+ * Note: This takes exclusive lock on flush_lock.
+ */
+bool nfs_inode::delete_start()
+{
+    AZLogDebug("[{}] delete_start() called", ino);
+
+    /*
+     * Caller must call delete_start() for regular files only.
+     */
+    assert(has_filecache());
+
+    /*
+     * Grab is_flushing lock, so that no new flush or commit can be issued
+     * till truncate() completes. There could be ongoing flush or commit
+     * operations in progress, we need to wait for them to complete.
+     */
+    flush_lock();
+
+    wait_for_ongoing_flush(0, UINT64_MAX);
+
+    AZLogDebug("[{}] Ongoing flush operations completed", ino);
+
+    /*
+     * Invalidate attribute cache for the inode.
+     */
+    invalidate_attribute_cache();
+
+    /*
+     * Now there are no ongoing flush or commit operations in progress.
+     * we can safely truncate the filecache.
+     */
+    (void)filecache_handle->truncate(0); //<<filecache_handle->(0);
+
+    // We are now safe to release the lock.
+    // TODO: Discuss if this should be done in the callback.
+    flush_unlock();
+
+    AZLogDebug("[{}] Filecache truncated to size 0", ino);
+
+    return true;
+}
+
 void nfs_inode::truncate_end() const
 {
     AZLogDebug("[{}] truncate_end() called", ino);
@@ -970,7 +1013,7 @@ bool nfs_inode::truncate_start(size_t size)
      * Now there are no ongoing flush or commit operations in progress.
      * we can safely truncate the filecache.
      */
-    auto truncate_size = filecache_handle->truncate(size);
+    auto truncate_size = filecache_handle->truncate(size); //<<filecache_handle->(0);
 
     AZLogDebug("[{}] Filecache truncated to size={}", ino, truncate_size);
 
@@ -1004,7 +1047,7 @@ bool nfs_inode::release(fuse_req_t req)
     invalidate_attribute_cache();
 
     client->unlink(req, parent_ino,
-                   silly_renamed_name.c_str(), true /* for_silly_rename */);
+                   silly_renamed_name.c_str(), 0, true /* for_silly_rename */);
     return true;
 }
 

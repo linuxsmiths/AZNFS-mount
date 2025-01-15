@@ -470,12 +470,14 @@ void rpc_task::init_mkdir(fuse_req *request,
 void rpc_task::init_unlink(fuse_req *request,
                            fuse_ino_t parent_ino,
                            const char *name,
+                           fuse_ino_t ino,
                            bool for_silly_rename)
 {
     assert(get_op_type() == FUSE_UNLINK);
     set_fuse_req(request);
     rpc_api->unlink_task.set_parent_ino(parent_ino);
     rpc_api->unlink_task.set_file_name(name);
+    rpc_api->unlink_task.set_ino(ino);
     rpc_api->unlink_task.set_for_silly_rename(for_silly_rename);
 
     fh_hash = get_client()->get_nfs_inode_from_ino(parent_ino)->get_crc();
@@ -2349,6 +2351,12 @@ void rpc_task::run_unlink()
         REMOVE3args args;
         args.object.dir = get_client()->get_nfs_inode_from_ino(parent_ino)->get_fh();
         args.object.name = (char*) rpc_api->unlink_task.get_file_name();
+        fuse_ino_t ino = rpc_api->unlink_task.get_ino();
+
+        if (ino) {
+            struct nfs_inode *inode = get_client()->get_nfs_inode_from_ino(ino);
+            inode->delete_start();
+        }
 
         rpc_retry = false;
         stats.on_rpc_issue();

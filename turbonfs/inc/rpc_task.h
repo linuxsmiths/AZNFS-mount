@@ -1001,6 +1001,11 @@ struct unlink_rpc_task
         return file_name;
     }
 
+    fuse_ino_t get_ino() const
+    {
+        return ino;
+    }
+
     bool get_for_silly_rename() const
     {
         return for_silly_rename;
@@ -1016,6 +1021,11 @@ struct unlink_rpc_task
         file_name = ::strdup(name);
     }
 
+    void set_ino(fuse_ino_t _ino)
+    {
+       ino = _ino;
+    }
+
     void set_for_silly_rename(bool _for_silly_rename)
     {
         for_silly_rename = _for_silly_rename;
@@ -1029,6 +1039,8 @@ struct unlink_rpc_task
 private:
     fuse_ino_t parent_ino;
     char *file_name;
+    // Inode being deleted.
+    fuse_ino_t ino;
 
     /*
      * Is this unlink task deleting a silly-renamed file when the last opencnt
@@ -2007,6 +2019,7 @@ public:
     void init_unlink(fuse_req *request,
                      fuse_ino_t parent_ino,
                      const char *name,
+                     fuse_ino_t ino,
                      bool for_silly_rename);
 
     void run_unlink();

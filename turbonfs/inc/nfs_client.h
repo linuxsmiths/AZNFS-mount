@@ -425,6 +425,7 @@ public:
         fuse_req_t req,
         fuse_ino_t parent_ino,
         const char *name,
+        fuse_ino_t ino,
         bool for_silly_rename);
 
     void rmdir(

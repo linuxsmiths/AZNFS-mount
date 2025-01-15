@@ -524,6 +524,10 @@ public:
     bool truncate_start(size_t size);
     void truncate_end() const;
 
+    bool delete_start();
+    // This may not be needed.
+    void delete_end() const;
+
     /**
      * This MUST be called only after has_filecache() returns true, else
      * there's a possibility of data race, as the returned filecache_handle
