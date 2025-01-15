@@ -72,6 +72,8 @@ set(LIBFUSE_BUILD_DIR "${CMAKE_BINARY_DIR}/extern/libfuse")
 # git submodule add https://github.com/jbeder/yaml-cpp.git extern/yaml-cpp
 # git submodule add https://github.com/gabime/spdlog.git extern/spdlog
 # git submodule add https://github.com/libfuse/libfuse.git extern/libfuse
+# git submodule add https://github.com/microsoft/vcpkg.git extern/vcpkg
+# git submodule add https://github.com/nlohmann/json.git extern/json
 #
 find_package(Git QUIET)
 if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/../.git")
@@ -105,6 +107,10 @@ endif()
 
 if(NOT EXISTS "${PROJECT_SOURCE_DIR}/extern/vcpkg/bootstrap-vcpkg.sh")
     message(FATAL_ERROR "The vcpkg submodule was not downloaded! GIT_SUBMODULE was turned off or failed. Please update submodules and try again.")
+endif()
+
+if(NOT EXISTS "${PROJECT_SOURCE_DIR}/extern/json/CMakeLists.txt")
+    message(FATAL_ERROR "The json submodule was not downloaded! GIT_SUBMODULE was turned off or failed. Please update submodules and try again.")
 endif()
 
 find_package(azure-identity-cpp CONFIG QUIET)
@@ -159,22 +165,6 @@ add_custom_command(
 )
 
 add_custom_target(libfuse ALL DEPENDS ${fuse3_LIBRARY})
-
-find_package(nlohmann_json QUIET)
-
-if(NOT nlohmann_json_FOUND)
-    message(STATUS "nlohmann_json not found, downloading it using FetchContent...")
-
-    include(FetchContent)
-    FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG v3.11.2 # Specify a stable version tag
-    )
-    FetchContent_MakeAvailable(nlohmann_json)
-else()
-    message(STATUS "Using nlohmann_json library")
-endif()
 
 #
 # We need GnuTLS for secure libnfs transport.
@@ -242,6 +232,9 @@ add_subdirectory(extern/yaml-cpp)
 
 # Build static library for spdlog.
 add_subdirectory(extern/spdlog)
+
+# Build static library for nlohmann_json.
+add_subdirectory(extern/json)
 
 configure_file(inc/aznfsc_config.h.in inc/aznfsc_config.h)
 
