@@ -965,7 +965,7 @@ aznfsclient_mount()
     #
     # Check the exit status to determine if it timed out.
     # If it's not timed out the client should have sent either "0"
-    # indicating success or one of the following -ve values indicating failure.
+    # indicating success or one of the following -ve values indicating failure:
     # -2 -> auth enabled in config but "az login" not found.
     # -1 -> some other error in mounting.
     # 
