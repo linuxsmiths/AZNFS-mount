@@ -63,7 +63,7 @@ bool nfs_connection::open()
                                              client_version,
                                              client_id.c_str());
         if (ret != 0) {
-            AZLogError("Failed to set auth values in nfs context command "
+            AZLogError("Failed to set auth values in nfs context, "
                        "exportpath={} tenantid={} subid={} authtype={} " 
                        "clientversion={} clientid={}",
                        mo.export_path.c_str(),

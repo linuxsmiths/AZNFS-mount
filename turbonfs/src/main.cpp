@@ -28,8 +28,8 @@ struct fuse_conn_info_opts* fuse_conn_info_opts_ptr;
  */
 #define AZNFSC_OPT(templ, key) { templ, offsetof(struct aznfsc_cfg, key), 0}
 
-// Is 'az login' required.
-// It becomes true when login is required but user has not performed the same.
+// Is 'az login' required?
+// It is set when the user is enabled auth in config but they have not 'az login'.
 bool is_azlogin_required = false; 
 
 // LogFile for this mount.
@@ -343,14 +343,14 @@ static std::string get_logdir()
 
 /*
  *  Generates an authentication token, sets the necessary arguments, 
- *        and returns a response structure.
+ *  and returns a response structure.
  * 
  * This function retrieves authentication context details, requests an access token 
  * from Azure CLI, and prepares a response structure containing the token and other 
- * metadata required for authentication. The response is formatted as an `auth_token_cb_res` object.
+ * metadata required for authentication.
  * 
- * @param auth Pointer to the authentication context structure containing user details.
- * @return Pointer to an `auth_token_cb_res` structure with authentication details, 
+ * auth: Pointer to the authentication context structure containing user details.
+ * auth_token_cb_res: Pointer to an `auth_token_cb_res` structure with authentication details.
  */    
 auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth) 
 {
@@ -366,13 +366,13 @@ auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth)
     // Allocate response structure
     auth_token_cb_res *cb_res = (auth_token_cb_res *) malloc(sizeof(auth_token_cb_res));    
     if (!cb_res) {
-        AZLogError("Failed to allocate memory for auth_token_cb_res.");
+        AZLogError("Failed to allocate memory for auth_token_cb_res");
         return nullptr;
     }
 
-    AZLogDebug("get_auth_token_and_setargs_cb: tenantid: {} subscriptionid: {}", 
-                nfs_get_tenantid(auth),
-                nfs_get_subscriptionid(auth));
+    AZLogInfo("get_auth_token_and_setargs_cb: tenantid: {} subscriptionid: {}", 
+               nfs_get_tenantid(auth),
+               nfs_get_subscriptionid(auth));
 
     assert(nfs_get_tenantid(auth));
 
@@ -391,7 +391,7 @@ auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth)
     // Special exception handled when user has not logged in. 
     catch (const Azure::Core::Credentials::AuthenticationException& e) {
         AZLogError("Error in getting the token: AuthenticationException thrown, "
-                   "Reason Phrase: {}, setting is_azlogin_required=false", 
+                   "Reason Phrase: {}, setting is_azlogin_required=true", 
                    e.what());
         // User is required to perform 'az login'.
         is_azlogin_required = true;
@@ -404,7 +404,7 @@ auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth)
         return nullptr;
     }
 
-    uint64_t expirytime = Azure::Core::_internal::PosixTimeConverter::DateTimeToPosixTime(token.ExpiresOn);
+    const uint64_t expirytime = Azure::Core::_internal::PosixTimeConverter::DateTimeToPosixTime(token.ExpiresOn);
 
     // Prepare the authdata object. 
     json authdataObject = {
@@ -414,12 +414,12 @@ auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth)
         {"AuthorizedTill", std::to_string(expirytime)}
     };
 
-    // Convert authdata object to string
-    std::string authdataString = authdataObject.dump();
+    // Convert authdata object to string.
+    const std::string authdataString = authdataObject.dump();
 
     if (authdataString.empty()) {
-        AZLogError("Unable to create jsonObject with token related information "
-                   "token:{} SubscriptionID:{} TenantID:{} AuthorizedTill:{}",
+        AZLogError("Unable to create jsonObject with token related information, "
+                   "token: {} SubscriptionID: {} TenantID: {} AuthorizedTill: {}",
                    token.Token,
                    nfs_get_subscriptionid(auth),
                    nfs_get_tenantid(auth),
@@ -428,11 +428,11 @@ auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth)
         return nullptr;
     }
 
-    // Set auth_data in auth_token_cb_res
+    // Set auth_data in auth_token_cb_res.
     assert(authdataString.c_str());
     cb_res->azauth_data = strdup(authdataString.c_str());
 
-    // Set expirytime in auth_token_cb_res
+    // Set expirytime in auth_token_cb_res.
     assert(expirytime != 0);
     assert(expirytime >= static_cast<uint64_t>(time(NULL)));
     cb_res->expiry_time = expirytime;
@@ -682,7 +682,7 @@ err_out0:
         if (!pipe.is_open()) {
             AZLogError("Aznfsclient unable to send mount status on pipe.");
         } else {
-            // If is_azlogin_required is false, share the error code = -2 over the pipe.
+            // If is_azlogin_required is true, share the error code = -2 over the pipe.
             if (is_azlogin_required) {
                 ret = -2;
                 AZLogError("Not logged in using 'az login' when auth is enabled");

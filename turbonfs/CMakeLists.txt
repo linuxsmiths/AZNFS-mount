@@ -233,7 +233,7 @@ add_subdirectory(extern/yaml-cpp)
 # Build static library for spdlog.
 add_subdirectory(extern/spdlog)
 
-# Build static library for nlohmann_json.
+# Need to add this run nlohmann_json cmake which will correctly add the include directory.
 add_subdirectory(extern/json)
 
 configure_file(inc/aznfsc_config.h.in inc/aznfsc_config.h)
@@ -298,7 +298,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
                       yaml-cpp
                       spdlog
                       Azure::azure-identity 
-                      Azure::azure-storage-blobs)
+                      Azure::azure-storage-blobs
+                      nlohmann_json::nlohmann_json)
 
 if(ENABLE_TCMALLOC)
 target_link_libraries(${CMAKE_PROJECT_NAME}
