@@ -183,6 +183,11 @@ struct nfs_inode
     std::atomic<uint64_t> opencnt = 0;
 
     /*
+     * This will be marked to true when this inode is deleted.
+     */
+    std::atomic<bool> is_deleted = 0;
+
+    /*
      * Silly rename related info.
      * If this inode has been successfully silly renamed, is_silly_renamed will
      * be set and silly_renamed_name will contain the silly renamed name and

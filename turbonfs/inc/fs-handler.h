@@ -154,6 +154,9 @@ static void aznfsc_ll_unlink(fuse_req_t req,
                fmt::ptr(req), parent_ino, name);
 
     struct nfs_client *client = get_nfs_client_from_fuse_req(req);
+    struct nfs_inode *parent_inode = client->get_nfs_inode_from_ino(parent_ino);
+    struct nfs_inode *inode = parent_inode->lookup(name);
+    const fuse_ino_t ino = inode ? inode->get_fuse_ino() : 0;
 
     /*
      * Call silly_rename() to see if it wants to silly rename instead of unlink.
@@ -167,7 +170,7 @@ static void aznfsc_ll_unlink(fuse_req_t req,
         return;
     }
 
-    client->unlink(req, parent_ino, name, false /* for_silly_rename */);
+    client->unlink(req, parent_ino, name, ino, false /* for_silly_rename */);
 }
 
 [[maybe_unused]]
@@ -181,7 +184,11 @@ static void aznfsc_ll_rmdir(fuse_req_t req,
                fmt::ptr(req), parent_ino, name);
 
     struct nfs_client *client = get_nfs_client_from_fuse_req(req);
-    client->rmdir(req, parent_ino, name);
+    struct nfs_inode *parent_inode = client->get_nfs_inode_from_ino(parent_ino);
+    struct nfs_inode *inode = parent_inode->lookup(name);
+    const fuse_ino_t ino = inode ? inode->get_fuse_ino() : 0;
+
+    client->rmdir(req, parent_ino, name, ino);
 }
 
 [[maybe_unused]]
@@ -271,8 +278,12 @@ static void aznfsc_ll_rename(fuse_req_t req,
         return;
     }
 
+    struct nfs_inode *newparent_inode = client->get_nfs_inode_from_ino(newparent_ino);
+    struct nfs_inode *inode = newparent_inode->lookup(newname);
+    const fuse_ino_t ino_to_del = inode ? inode->get_fuse_ino(): 0; 
+
     // Perform user requested rename.
-    client->rename(req, parent_ino, name, newparent_ino, newname);
+    client->rename(req, parent_ino, name, newparent_ino, newname, ino_to_del);
 }
 
 [[maybe_unused]]
@@ -328,6 +339,12 @@ static void aznfsc_ll_open(fuse_req_t req,
 
     // Make sure it's not called for directories.
     assert(!inode->is_dir());
+
+    /*
+     * Fuse should not call open() for deleted inode.
+     * The inode will still be valid till a forget call is made.
+     */
+    assert(!inode->is_deleted);
 
     /*
      * TODO: See comments in readahead.h, ideally readahead state should be
@@ -523,6 +540,12 @@ static void aznfsc_ll_opendir(fuse_req_t req,
     struct nfs_inode *inode = client->get_nfs_inode_from_ino(ino);
 
     assert(inode->is_dir());
+
+    /*
+     * Fuse should not call opendir() for deleted inode.
+     * The inode will still be valid till a forget call is made.
+     */
+    assert(!inode->is_deleted);
 
     inode->on_fuse_open(FUSE_OPENDIR);
     assert(inode->opencnt > 0);

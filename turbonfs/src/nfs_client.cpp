@@ -360,7 +360,8 @@ void nfs_client::jukebox_runner()
                               js->rpc_api->rmdir_task.get_dir_name());
                     rmdir(js->rpc_api->req,
                           js->rpc_api->rmdir_task.get_parent_ino(),
-                          js->rpc_api->rmdir_task.get_dir_name());
+                          js->rpc_api->rmdir_task.get_dir_name(),
+                          js->rpc_api->rmdir_task.get_ino());
                     break;
                 case FUSE_UNLINK:
                     AZLogWarn("[JUKEBOX REISSUE] unlink(req={}, parent_ino={}, "
@@ -372,6 +373,7 @@ void nfs_client::jukebox_runner()
                     unlink(js->rpc_api->req,
                            js->rpc_api->unlink_task.get_parent_ino(),
                            js->rpc_api->unlink_task.get_file_name(),
+                           js->rpc_api->unlink_task.get_ino(),
                            js->rpc_api->unlink_task.get_for_silly_rename());
                     break;
                 case FUSE_SYMLINK:
@@ -412,7 +414,8 @@ void nfs_client::jukebox_runner()
                            js->rpc_api->rename_task.get_name(),
                            js->rpc_api->rename_task.get_newparent_ino(),
                            js->rpc_api->rename_task.get_newname(),
-                           js->rpc_api->rename_task.get_silly_rename(),
+                           js->rpc_api->rename_task.get_ino_to_be_deleted(),
+			   js->rpc_api->rename_task.get_silly_rename(),
                            js->rpc_api->rename_task.get_silly_rename_ino(),
                            js->rpc_api->rename_task.get_oldparent_ino(),
                            js->rpc_api->rename_task.get_oldname());
@@ -1233,9 +1236,18 @@ bool nfs_client::silly_rename(
          */
         inode->opencnt++;
 
-        rename(req, parent_ino, name, parent_ino, newname,
-               true /* silly_rename */, inode->get_fuse_ino(),
-               oldparent_ino, old_name);
+        if (rename_triggered_silly_rename) {
+            rename(req, parent_ino, name, parent_ino, newname,
+                   inode->get_fuse_ino(),
+                   true /* silly_rename */, inode->get_fuse_ino(),
+                   oldparent_ino, old_name);
+        }
+        else {
+            rename(req, parent_ino, name, parent_ino, newname,
+                0 /* ino_to_mark_deleted */,
+                true /* silly_rename */, inode->get_fuse_ino(),
+                oldparent_ino, old_name);
+        }
 
         return true;
     } else if (!inode) {
@@ -1271,22 +1283,24 @@ void nfs_client::unlink(
     fuse_req_t req,
     fuse_ino_t parent_ino,
     const char* name,
+    fuse_ino_t ino,
     bool for_silly_rename)
 {
     struct rpc_task *tsk = rpc_task_helper->alloc_rpc_task(FUSE_UNLINK);
 
-    tsk->init_unlink(req, parent_ino, name, for_silly_rename);
+    tsk->init_unlink(req, parent_ino, name, ino, for_silly_rename);
     tsk->run_unlink();
 }
 
 void nfs_client::rmdir(
     fuse_req_t req,
     fuse_ino_t parent_ino,
-    const char* name)
+    const char* name,
+    fuse_ino_t ino)
 {
     struct rpc_task *tsk = rpc_task_helper->alloc_rpc_task(FUSE_RMDIR);
     struct nfs_inode *parent_inode = get_nfs_inode_from_ino(parent_ino);
-    struct nfs_inode *inode = parent_inode->lookup(name);
+    struct nfs_inode *inode = get_nfs_inode_from_ino(ino);
 
     if (parent_inode->has_dircache()) {
         parent_inode->get_dircache()->dnlc_remove(name);
@@ -1297,7 +1311,7 @@ void nfs_client::rmdir(
         inode->invalidate_attribute_cache();
     }
 
-    tsk->init_rmdir(req, parent_ino, name);
+    tsk->init_rmdir(req, parent_ino, name, ino);
     tsk->run_rmdir();
 }
 
@@ -1325,6 +1339,7 @@ void nfs_client::rename(
     const char *name,
     fuse_ino_t newparent_ino,
     const char *new_name,
+    fuse_ino_t ino_to_mark_deleted,
     bool silly_rename,
     fuse_ino_t silly_rename_ino,
     fuse_ino_t oldparent_ino,
@@ -1356,7 +1371,8 @@ void nfs_client::rename(
     }
 
     tsk->init_rename(req, parent_ino, name, newparent_ino, new_name,
-                     silly_rename, silly_rename_ino, oldparent_ino, old_name);
+                     ino_to_mark_deleted, silly_rename, silly_rename_ino,
+                     oldparent_ino, old_name);
     tsk->run_rename();
 }
 
