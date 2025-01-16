@@ -525,6 +525,21 @@ public:
     void truncate_end() const;
 
     /**
+     * delete_start() must be called before issuing the REMOVE/RENAME RPC
+     * and delete_end() must be called from their respective callback.
+     * delete_start() grabs the is_flushing lock to ensure no new flush/commit
+     * operations can be issued for this inode, and waits for any ongoing
+     * flush/commit operations to complete, before truncating the filecache
+     * to 0 size.
+     * delete_end() simply calls flush_unlock() to release the is_flushing
+     * lock held by delete_start().
+     * This two apis together ensure that any flush/commit operation cannot
+     * run after the file has been deleted/renamed.
+     */
+    bool delete_start();
+    void delete_end() const;
+
+    /**
      * This MUST be called only after has_filecache() returns true, else
      * there's a possibility of data race, as the returned filecache_handle
      * ref may be updated by alloc_filecache() right after get_filecache()

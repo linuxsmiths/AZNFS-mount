@@ -1001,6 +1001,11 @@ struct unlink_rpc_task
         return file_name;
     }
 
+    fuse_ino_t get_ino() const
+    {
+        return ino;
+    }
+
     bool get_for_silly_rename() const
     {
         return for_silly_rename;
@@ -1016,6 +1021,11 @@ struct unlink_rpc_task
         file_name = ::strdup(name);
     }
 
+    void set_ino(fuse_ino_t _ino)
+    {
+       ino = _ino;
+    }
+
     void set_for_silly_rename(bool _for_silly_rename)
     {
         for_silly_rename = _for_silly_rename;
@@ -1029,6 +1039,12 @@ struct unlink_rpc_task
 private:
     fuse_ino_t parent_ino;
     char *file_name;
+    /*
+     * Inode being deleted.
+     * This should be set only for regular file which has filecache
+     * allocated.
+     */
+    fuse_ino_t ino;
 
     /*
      * Is this unlink task deleting a silly-renamed file when the last opencnt
@@ -1180,6 +1196,16 @@ struct rename_rpc_task
         return newparent_ino;
     }
 
+    void set_dst_ino(fuse_ino_t dst)
+    {
+        dst_ino = dst;
+    }
+
+    fuse_ino_t get_dst_ino() const
+    {
+        return dst_ino;
+    }
+
     void set_newname(const char *name)
     {
         assert(name != nullptr);
@@ -1260,6 +1286,13 @@ private:
     char *name;
     char *newname;
     char *oldname;
+    /*
+     * Inode of the destination being renamed.
+     * This should be set only for regular file which has filecache
+     * allocated.
+     */
+    fuse_ino_t dst_ino;
+
     bool silly_rename;
     fuse_ino_t silly_rename_ino;
 };
@@ -2007,6 +2040,7 @@ public:
     void init_unlink(fuse_req *request,
                      fuse_ino_t parent_ino,
                      const char *name,
+                     fuse_ino_t ino,
                      bool for_silly_rename);
 
     void run_unlink();
@@ -2070,6 +2104,7 @@ public:
                      const char *name,
                      fuse_ino_t newparent_ino,
                      const char *newname,
+                     fuse_ino_t dst_ino = 0,
                      bool silly_rename = false,
                      fuse_ino_t silly_rename_ino = 0,
                      fuse_ino_t oldparent_ino = 0,

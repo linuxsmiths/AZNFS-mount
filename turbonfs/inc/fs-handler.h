@@ -155,6 +155,10 @@ static void aznfsc_ll_unlink(fuse_req_t req,
 
     struct nfs_client *client = get_nfs_client_from_fuse_req(req);
 
+    struct nfs_inode *parent_inode = client->get_nfs_inode_from_ino(parent_ino);
+    struct nfs_inode *inode = parent_inode->lookup(name);
+    const fuse_ino_t ino = (inode && inode->is_regfile()) ? inode->get_fuse_ino() : 0;
+
     /*
      * Call silly_rename() to see if it wants to silly rename instead of unlink.
      * We will perform silly rename if the opencnt of the file is not 0, i.e.,
@@ -167,7 +171,7 @@ static void aznfsc_ll_unlink(fuse_req_t req,
         return;
     }
 
-    client->unlink(req, parent_ino, name, false /* for_silly_rename */);
+    client->unlink(req, parent_ino, name, ino, false /* for_silly_rename */);
 }
 
 [[maybe_unused]]
@@ -242,6 +246,10 @@ static void aznfsc_ll_rename(fuse_req_t req,
     }
 
     struct nfs_client *client = get_nfs_client_from_fuse_req(req);
+    struct nfs_inode *newparent_inode = client->get_nfs_inode_from_ino(newparent_ino);
+    struct nfs_inode *dst_inode = newparent_inode->lookup(newname);
+    const fuse_ino_t dst_ino =
+        (dst_inode && dst_inode->is_regfile()) ? dst_inode->get_fuse_ino(): 0; 
 
     /*
      * Call silly_rename() to see if it wants to silly rename the outgoing file
@@ -272,7 +280,7 @@ static void aznfsc_ll_rename(fuse_req_t req,
     }
 
     // Perform user requested rename.
-    client->rename(req, parent_ino, name, newparent_ino, newname);
+    client->rename(req, parent_ino, name, newparent_ino, newname, dst_ino);
 }
 
 [[maybe_unused]]

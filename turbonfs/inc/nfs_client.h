@@ -425,6 +425,7 @@ public:
         fuse_req_t req,
         fuse_ino_t parent_ino,
         const char *name,
+        fuse_ino_t ino,
         bool for_silly_rename);
 
     void rmdir(
@@ -455,6 +456,7 @@ public:
         const char *name,
         fuse_ino_t newparent_ino,
         const char *new_name,
+        fuse_ino_t dst_ino = 0,
         bool silly_rename = false,
         fuse_ino_t silly_rename_ino = 0,
         fuse_ino_t oldparent_ino = 0,

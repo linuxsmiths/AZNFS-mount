@@ -470,12 +470,14 @@ void rpc_task::init_mkdir(fuse_req *request,
 void rpc_task::init_unlink(fuse_req *request,
                            fuse_ino_t parent_ino,
                            const char *name,
+                           fuse_ino_t ino,
                            bool for_silly_rename)
 {
     assert(get_op_type() == FUSE_UNLINK);
     set_fuse_req(request);
     rpc_api->unlink_task.set_parent_ino(parent_ino);
     rpc_api->unlink_task.set_file_name(name);
+    rpc_api->unlink_task.set_ino(ino);
     rpc_api->unlink_task.set_for_silly_rename(for_silly_rename);
 
     fh_hash = get_client()->get_nfs_inode_from_ino(parent_ino)->get_crc();
@@ -524,6 +526,7 @@ void rpc_task::init_rename(fuse_req *request,
                            const char *name,
                            fuse_ino_t newparent_ino,
                            const char *newname,
+                           fuse_ino_t dst_ino,
                            bool silly_rename,
                            fuse_ino_t silly_rename_ino,
                            fuse_ino_t oldparent_ino,
@@ -543,6 +546,7 @@ void rpc_task::init_rename(fuse_req *request,
     rpc_api->rename_task.set_name(name);
     rpc_api->rename_task.set_newparent_ino(newparent_ino);
     rpc_api->rename_task.set_newname(newname);
+    rpc_api->rename_task.set_dst_ino(dst_ino);
     rpc_api->rename_task.set_silly_rename(silly_rename);
     rpc_api->rename_task.set_silly_rename_ino(silly_rename_ino);
     rpc_api->rename_task.set_oldparent_ino(oldparent_ino);
@@ -1427,6 +1431,14 @@ void unlink_callback(
      */
     task->get_stats().on_rpc_complete(rpc_get_pdu(rpc), NFS_STATUSX(rpc_status, res));
 
+    const fuse_ino_t ino = task->rpc_api->unlink_task.get_ino();
+    if (ino) {
+        struct nfs_inode *inode = task->get_client()->get_nfs_inode_from_ino(ino);
+        if (inode) {
+            inode->delete_end();
+        }
+    }
+
     if (NFS_STATUS(res) == NFS3ERR_JUKEBOX) {
         task->get_client()->jukebox_retry(task);
     } else {
@@ -1635,6 +1647,14 @@ void rename_callback(
      * dispatch time.
      */
     task->get_stats().on_rpc_complete(rpc_get_pdu(rpc), NFS_STATUSX(rpc_status, res));
+
+    const fuse_ino_t ino = task->rpc_api->rename_task.get_dst_ino();
+    if (ino) {
+        struct nfs_inode *inode = task->get_client()->get_nfs_inode_from_ino(ino);
+        if (inode) {
+            inode->delete_end();
+        }
+    }
 
     /*
      * If this rename is a silly rename for an unlink/rename operation, we need
@@ -2349,6 +2369,15 @@ void rpc_task::run_unlink()
         REMOVE3args args;
         args.object.dir = get_client()->get_nfs_inode_from_ino(parent_ino)->get_fh();
         args.object.name = (char*) rpc_api->unlink_task.get_file_name();
+        fuse_ino_t ino = rpc_api->unlink_task.get_ino();
+        struct nfs_inode *inode = nullptr;
+
+        if (ino) {
+            inode = get_client()->get_nfs_inode_from_ino(ino);
+            if (inode) {
+                inode->delete_start();
+            }
+        }
 
         rpc_retry = false;
         stats.on_rpc_issue();
@@ -2366,6 +2395,12 @@ void rpc_task::run_unlink()
 
             AZLogWarn("rpc_nfs3_remove_task failed to issue, retrying "
                       "after 5 secs!");
+            
+            if (inode) {
+                AZLogDebug("[{}]: Releasing flush_lock", ino);
+                inode->delete_end();
+            }
+
             ::sleep(5);
         }
     } while (rpc_retry);
@@ -2457,6 +2492,15 @@ void rpc_task::run_rename()
         args.from.name = (char*) rpc_api->rename_task.get_name();
         args.to.dir = get_client()->get_nfs_inode_from_ino(newparent_ino)->get_fh();
         args.to.name = (char*) rpc_api->rename_task.get_newname();
+        struct nfs_inode *dst_inode = nullptr;
+
+        fuse_ino_t dst_ino = rpc_api->rename_task.get_dst_ino();
+        if (dst_ino) {
+            dst_inode = get_client()->get_nfs_inode_from_ino(dst_ino);
+            if (dst_inode) {
+                dst_inode->delete_start();
+            }
+        }
 
         rpc_retry = false;
         stats.on_rpc_issue();
@@ -2476,6 +2520,12 @@ void rpc_task::run_rename()
 
             AZLogWarn("rpc_nfs3_rename_task failed to issue, retrying "
                       "after 5 secs!");
+
+            if (dst_inode) {
+                AZLogDebug("[{}]: Releasing flush_lock", dst_ino);
+                dst_inode->delete_end();
+            }
+
             ::sleep(5);
         }
     } while (rpc_retry);
