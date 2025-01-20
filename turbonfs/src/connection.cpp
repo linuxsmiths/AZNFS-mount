@@ -17,49 +17,73 @@ struct auth_info
     std::string usertype;
 };
 
-std::string execCommand(const std::string& command)
-{
-    std::array<char, 128> buffer;
-    std::string result;
-    using PipeCloser = int (*)(FILE*);
-    std::unique_ptr<FILE, PipeCloser> pipe(popen(command.c_str(), "r"), pclose);
+std::string run_command(const std::string& command) {
+    /*
+     * Currently we only use it to run 'az account show' command.
+     * 4KB should be sufficient to store the output of above command.
+     */ 
+    constexpr size_t BUFFER_SIZE = 4096;
+    std::string buffer;
+    buffer.reserve(BUFFER_SIZE);
+
+    // Open a pipe to execute the command
+    FILE *pipe = popen(command.c_str(), "r");
     if (!pipe) {
-        throw std::runtime_error("Failed to open pipe for command execution.");
+        AZLogError("Failed to open pipe for command execution: {}", command);
+        return "";
     }
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
+
+    size_t bytes_read = fread((void*)buffer.c_str(), 1, BUFFER_SIZE, pipe);
+
+    if (ferror(pipe) || (bytes_read <= 0) ) {
+        AZLogError("Failed to read from the pipe: {}, command: {}", bytes_read, command);
+        return "";
     }
-    return result;
+
+    if (!feof(pipe)) {
+        AZLogError("Command output exceeds {} bytes, command: {}", BUFFER_SIZE, command);
+        return "";
+    }
+
+    // Close the pipe
+    int ret = pclose(pipe);
+    if (ret != 0) {
+        AZLogError("Command execution failed with return code: {}", ret);
+        return "";
+    }
+
+    buffer.resize(bytes_read);
+    return buffer;
 }
 
 struct auth_info get_authinfo_data()
 {
-    auth_info authInfo;
+    auth_info auth_info;
     try {
         // Run the 'az account show' command
-        std::string commandOutput = execCommand("az account show --output json");
-        auto jsonData = json::parse(commandOutput);
+        std::string command_output = run_command("az account show --output json");
+        auto json_data = json::parse(command_output);
 
         // Extract tenantid, subscriptionid, and user details from the parsed JSON
-        authInfo.tenantid = jsonData["tenantId"].get<std::string>();
-        authInfo.subscriptionid = jsonData["id"].get<std::string>();
-        authInfo.username = jsonData["user"]["name"].get<std::string>();
-        authInfo.usertype = jsonData["user"]["type"].get<std::string>();
+        auth_info.tenantid = json_data["tenantId"].get<std::string>();
+        auth_info.subscriptionid = json_data["id"].get<std::string>();
+        auth_info.username = json_data["user"]["name"].get<std::string>();
+        auth_info.usertype = json_data["user"]["type"].get<std::string>();
 
         // Log the details (using AZLogDebug or any other logging framework you prefer)
         AZLogDebug(
             "Auth information received from 'az account show --output json': "
             "tenantid: {} subscriptionid: {} username: {} usertype: {}",
-            authInfo.tenantid.c_str(),
-            authInfo.subscriptionid.c_str(),
-            authInfo.username.c_str(),
-            authInfo.usertype.c_str());
+            auth_info.tenantid.c_str(),
+            auth_info.subscriptionid.c_str(),
+            auth_info.username.c_str(),
+            auth_info.usertype.c_str());
 
     } catch (const std::exception& ex) {
         AZLogError("'az account show --output json': Getting auth information data failed: {} ",  ex.what());
     }
 
-    return authInfo;
+    return auth_info;
 }
 
 bool nfs_connection::open()
