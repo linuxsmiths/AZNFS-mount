@@ -23,8 +23,7 @@ std::string run_command(const std::string& command) {
      * 4KB should be sufficient to store the output of above command.
      */ 
     constexpr size_t BUFFER_SIZE = 4096;
-    std::string buffer;
-    buffer.reserve(BUFFER_SIZE);
+    std::string output(BUFFER_SIZE, '\0');
 
     // Open a pipe to execute the command
     FILE *pipe = popen(command.c_str(), "r");
@@ -33,18 +32,21 @@ std::string run_command(const std::string& command) {
         return "";
     }
 
-    size_t bytes_read = fread((void*)buffer.c_str(), 1, BUFFER_SIZE, pipe);
+    size_t bytes_read = fread(const_cast<char*>(output.data()), 1, BUFFER_SIZE, pipe);
 
     if (ferror(pipe) || (bytes_read <= 0) ) {
         AZLogError("Failed to read from the pipe: {}, command: {}", bytes_read, command);
-        return "";
+        goto close_pipe;
     }
 
+    // We expect the entire command output to fit in the buffer size bytes. 
     if (!feof(pipe)) {
         AZLogError("Command output exceeds {} bytes, command: {}", BUFFER_SIZE, command);
-        return "";
+        bytes_read = 0;
+        goto close_pipe;
     }
 
+close_pipe:
     // Close the pipe
     int ret = pclose(pipe);
     if (ret != 0) {
@@ -52,8 +54,13 @@ std::string run_command(const std::string& command) {
         return "";
     }
 
-    buffer.resize(bytes_read);
-    return buffer;
+    if (bytes_read > 0)
+    {
+        output.resize(bytes_read);
+        return output;
+    }
+
+    return "";
 }
 
 struct auth_info get_authinfo_data()
@@ -62,6 +69,7 @@ struct auth_info get_authinfo_data()
     try {
         // Run the 'az account show' command
         std::string command_output = run_command("az account show --output json");
+
         auto json_data = json::parse(command_output);
 
         // Extract tenantid, subscriptionid, and user details from the parsed JSON
