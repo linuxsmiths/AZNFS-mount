@@ -2761,6 +2761,39 @@ public:
 };
 
 /**
+ * Write task info which is needed to complete with a delay.
+ */
+struct throttle_seedinfo
+{
+    ~throttle_seedinfo()
+    {
+        /*
+         * This will also call api_task_info::release().
+         */
+        rpc_api->release();
+        delete rpc_api;
+    }
+
+    /*
+     * Information needed to restart the task.
+     */
+    api_task_info *rpc_api;
+
+    /*
+     * When to rerun the task.
+     */
+    int64_t run_at_msecs;
+
+    throttle_seedinfo(api_task_info *_rpc_api, int64_t _run_at_msecs) :
+        rpc_api(_rpc_api),
+        run_at_msecs(_run_at_msecs)
+    {
+        assert(rpc_api != nullptr);
+    }
+};
+
+
+/**
  * Seed info needed to re-run a task that had failed with JUKEBOX error.
  */
 struct jukebox_seedinfo

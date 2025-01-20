@@ -1346,6 +1346,7 @@ public:
      * Lock the inode for flushing.
      */
     void flush_lock() const;
+    bool flush_trylock() const;
     void flush_unlock() const;
 
     /**

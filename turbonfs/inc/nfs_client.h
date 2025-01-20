@@ -57,6 +57,11 @@ extern "C" {
  */
 #define JUKEBOX_DELAY_SECS 5
 
+/**
+ * Maximum delay in milliseconds for throttling writes.
+ */
+#define THROTTLE_DELAY_MAX_MSEC 1000
+
 struct nfs_client
 {
     const uint32_t magic = NFS_CLIENT_MAGIC;
@@ -115,6 +120,19 @@ private:
     void jukebox_runner();
     std::queue<struct jukebox_seedinfo*> jukebox_seeds;
     mutable std::mutex jukebox_seeds_lock_39;
+
+    /*
+     * Throttle writes in case of memory pressure. Ideally we should
+     * not complete the writes request till we have enough memory to
+     * serve the request. We can't block the writes as that'll block
+     * the other calls as well. So we complete the writes with a delay.
+     */
+    std::thread write_throttle_thread;
+    void write_throttle_runner();
+    std::queue<struct throttle_seedinfo*> throttle_seeds;
+    mutable std::mutex throttle_seeds_lock_39;
+    mutable std::condition_variable_any throttle_seeds_cv;
+    int64_t throttle_delay_msec = 10;
 
     /*
      * Holds info about the server, queried by FSINFO.
@@ -549,6 +567,8 @@ public:
      * after JUKEBOX_DELAY_SECS seconds.
      */
     void jukebox_retry(struct rpc_task *task);
+
+    void queue_to_throttle_runner(struct rpc_task *task);
 };
 
 /**

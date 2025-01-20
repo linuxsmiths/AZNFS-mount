@@ -1925,8 +1925,6 @@ void rpc_task::run_access()
     } while (rpc_retry);
 }
 
-
-
 void rpc_task::run_write()
 {
     // This must be called only for front end tasks.
@@ -2091,17 +2089,26 @@ void rpc_task::run_write()
         AZLogDebug("[{}] Inline write (sparse={}), {} bytes, extent @ [{}, {})",
                    ino, sparse_write, (extent_right - extent_left),
                    extent_left, extent_right);
-
-        const int err = inode->flush_cache_and_wait(extent_left, extent_right);
-        if (err == 0) {
-            reply_write(length);
-            return;
+        if (inode->flush_trylock()) {
+            const int err = inode->flush_cache_and_wait(extent_left, extent_right);
+            inode->flush_unlock();
+            if (err == 0) {
+               reply_write(length);
+                return;
+            } else {
+                AZLogError("[{}] Inline write, {} bytes extent @ [{}, {}), failed "
+                        "with err {}",
+                        ino, (extent_right - extent_left),
+                        extent_left, extent_right, err);
+                reply_error(err);
+                return;
+            }
         } else {
-            AZLogError("[{}] Inline write, {} bytes extent @ [{}, {}), failed "
-                       "with err {}",
-                       ino, (extent_right - extent_left),
-                       extent_left, extent_right, err);
-            reply_error(err);
+            AZLogWarn("[{}] Inline write, {} bytes extent @ [{}, {}), failed "
+                      "to get flush lock",
+                      ino, (extent_right - extent_left),
+                      extent_left, extent_right);
+            client->queue_to_throttle_runner(this);
             return;
         }
     }
@@ -2137,8 +2144,10 @@ void rpc_task::run_flush()
 {
     const fuse_ino_t ino = rpc_api->flush_task.get_ino();
     struct nfs_inode *const inode = get_client()->get_nfs_inode_from_ino(ino);
-
-    reply_error(inode->flush_cache_and_wait());
+    inode->flush_lock();
+    int err = inode->flush_cache_and_wait();
+    inode->flush_unlock();
+    reply_error(err);
 }
 
 void rpc_task::run_getattr()

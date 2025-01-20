@@ -79,6 +79,11 @@ bool nfs_client::init()
      */
     jukebox_thread = std::thread(&nfs_client::jukebox_runner, this);
 
+    /*
+     * Start the write throttle thread for throttling write requests.
+     */
+    write_throttle_thread = std::thread(&nfs_client::write_throttle_runner, this);
+
     return true;
 }
 
@@ -209,6 +214,68 @@ void nfs_client::shutdown()
     assert(inode_map.size() == 0);
 
     jukebox_thread.join();
+    write_throttle_thread.join();
+}
+
+void nfs_client::write_throttle_runner()
+{
+    AZLogDebug("Started write_throttle_runner");
+    useconds_t throttle_delay = 0;
+
+    do {
+        int throttle_requests;
+
+        {
+            std::unique_lock<std::mutex> lock(throttle_seeds_lock_39);
+            throttle_requests = throttle_seeds.size();
+        }
+
+        /*
+         * If no throttle queued, wait more else wait less in order to meet the
+         * 5 sec throttle deadline.
+         */
+        while (throttle_requests == 0 && !shutting_down) {
+            std::unique_lock<std::mutex> lock(throttle_seeds_lock_39);
+
+            throttle_seeds_cv.wait_for(lock, std::chrono::seconds(5));
+            throttle_requests = throttle_seeds.size();
+
+            AZLogDebug("write_throttle_runner woken up ({} requests in queue)",
+                           throttle_requests);
+        }
+
+        AZLogInfo("write_throttle_runner woken up ({} requests in queue)",
+                  throttle_requests);
+        assert(throttle_requests >= 0 || shutting_down);
+        ::usleep(throttle_delay * 1000);
+
+        /*
+         * Go over all queued requests and issue those which are ready to be
+         * issued, i.e., they have been queued for more than JUKEBOX_DELAY_SECS
+         * seconds. We issue the requests after releasing jukebox_seeds_lock_39.
+         */
+        std::vector<struct throttle_seedinfo *> tsv;
+        {
+            std::unique_lock<std::mutex> lock(throttle_seeds_lock_39);
+            while (!throttle_seeds.empty()) {
+                struct throttle_seedinfo *ts = throttle_seeds.front();
+
+                if (ts->run_at_msecs > get_current_msecs()) {
+                    throttle_delay = ts->run_at_msecs - get_current_msecs();
+                    break;
+                }
+
+                throttle_seeds.pop();
+
+                AZLogInfo("[THROTTLE REPLY] write(req={}, ino={})",
+                          fmt::ptr(ts->rpc_api->req),
+                          ts->rpc_api->write_task.get_ino());
+                fuse_reply_write(ts->rpc_api->req,
+                                 ts->rpc_api->write_task.get_size());
+                delete ts;
+            }
+        }
+    } while (!shutting_down);
 }
 
 void nfs_client::jukebox_runner()
@@ -1741,6 +1808,53 @@ void nfs_client::reply_entry(
         task->reply_entry(&entry);
     }
 }
+
+void nfs_client::queue_to_throttle_runner(struct rpc_task *task)
+{
+    {
+        AZLogDebug("Queueing rpc_task {} for throttle", fmt::ptr(task));
+
+        int64_t delay = get_current_msecs();
+
+        /*
+         * Grab the lock to queue the task->rpc_api to throttle runner.
+         */
+        std::unique_lock<std::mutex> lock(throttle_seeds_lock_39);
+
+        /*
+         * Calculate the delay based on the number of seeds in the throttle.
+         */
+        if (throttle_seeds.size() > 100) {
+            throttle_delay_msec = std::min((int16_t) (throttle_delay_msec * 2), (int16_t) THROTTLE_DELAY_MAX_MSEC);
+            AZLogInfo("Throttle delay increased to {} msec", throttle_delay_msec);
+            delay += throttle_delay_msec;
+        } else {
+            AZLogInfo("Throttle delay is {} msec", throttle_delay_msec);
+            delay += throttle_delay_msec;
+        }
+
+        throttle_seeds.emplace(new throttle_seedinfo(task->rpc_api, delay));
+
+        /*
+         * Notify the throttle runner thread that there is a new seed to process.
+         * If there are more than one seed in the throttle, then throttle runner
+         * sleeps for the throttle_delay_msec before processing the next seed.
+         * Otherwise, it's waiting for condition variable to be notified.
+         */
+        if (throttle_seeds.size() == 1) {
+            throttle_seeds_cv.notify_one();
+        }
+
+        task->rpc_api = nullptr;
+    }
+
+    /*
+     * Free the current task as write is completed and we are delaying the
+     * response to the client.
+     */
+    task->free_rpc_task();
+}
+
 
 void nfs_client::jukebox_retry(struct rpc_task *task)
 {

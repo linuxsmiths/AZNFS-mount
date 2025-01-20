@@ -774,7 +774,7 @@ int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
 }
 
 /**
- * Note: This takes shared lock on ilock_1.
+ * Note: Caller should call with flush_lock() held.
  */
 int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
 {
@@ -805,16 +805,6 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
     if (!has_filecache()) {
         return 0;
     }
-
-    /*
-     * Grab the inode is_flushing lock to ensure that we doen't initiate
-     * any new flush operation while some truncate call is in progress
-     * (which must have taken the is_flushing lock).
-     * Once flush_lock() returns we have the is_flushing lock and we are
-     * guaranteed that no new truncate operation can start till we release
-     * the is_flushing lock. We can safely start the flush then.
-     */
-    flush_lock();
 
     /*
      * Get the dirty bytes_chunk from the filecache handle.
@@ -874,8 +864,25 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
         filecache_handle->release(bc.offset, bc.length);
     }
 
-    flush_unlock();
     return get_write_error();
+}
+
+bool nfs_inode::flush_trylock() const
+{
+    AZLogDebug("[{}] flush_trylock() called", ino);
+
+    /*
+     * Caller must call flush_trylock() for regular files only.
+     */
+    assert(has_filecache());
+
+    if (!std::atomic_exchange(&is_flushing, true)) {
+        AZLogDebug("[{}] flush_trylock() acquired", ino);
+        return true;
+    }
+
+    AZLogDebug("[{}] flush_trylock() failed", ino);
+    return false;
 }
 
 void nfs_inode::flush_lock() const
