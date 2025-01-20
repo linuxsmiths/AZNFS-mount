@@ -4,6 +4,64 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <azure/identity/azure_cli_credential.hpp>
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
+
+struct auth_info
+    {
+        std::string tenantid;
+        std::string subscriptionid;
+        std::string username;
+        std::string usertype;
+    };
+
+    std::string execCommand(const std::string& command)
+    {
+        std::array<char, 128> buffer;
+        std::string result;
+        using PipeCloser = int (*)(FILE*);
+        std::unique_ptr<FILE, PipeCloser> pipe(popen(command.c_str(), "r"), pclose);
+        if (!pipe) {
+            throw std::runtime_error("Failed to open pipe for command execution.");
+        }
+        while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+            result += buffer.data();
+        }
+        return result;
+    }
+
+    struct auth_info get_authinfo_data()
+    {
+        auth_info authInfo;
+        try {
+            // Run the 'az account show' command
+            std::string commandOutput = execCommand("az account show --output json");
+            auto jsonData = json::parse(commandOutput);
+
+            // Extract tenantid, subscriptionid, and user details from the parsed JSON
+            authInfo.tenantid = jsonData["tenantId"].get<std::string>();
+            authInfo.subscriptionid = jsonData["id"].get<std::string>();
+            authInfo.username = jsonData["user"]["name"].get<std::string>();
+            authInfo.usertype = jsonData["user"]["type"].get<std::string>();
+
+            // Log the details (using AZLogDebug or any other logging framework you prefer)
+            AZLogDebug(
+                "Auth information received from 'az account show --output json': "
+                "tenantid: {} subscriptionid: {} username: {} usertype: {}",
+                authInfo.tenantid.c_str(),
+                authInfo.subscriptionid.c_str(),
+                authInfo.username.c_str(),
+                authInfo.usertype.c_str());
+
+        } catch (const std::exception& ex) {
+            AZLogError("'az account show --output json': Getting auth information data failed: {} ",  ex.what());
+        }
+
+        return authInfo;
+
+    }
 
 bool nfs_connection::open()
 {
@@ -35,30 +93,33 @@ bool nfs_connection::open()
     nfs_destroy_url(url);
 
     if (mo.auth) {
+
+        struct auth_info authinfo = get_authinfo_data();
+
         // 16 should be sufficient to hold the version string.
         char client_version[16];
 
         [[maybe_unused]]
         const uint64_t n = snprintf(client_version, sizeof(client_version), 
-                               "%d.%d.%d", AZNFSCLIENT_VERSION_MAJOR, 
-                               AZNFSCLIENT_VERSION_MINOR, 
-                               AZNFSCLIENT_VERSION_PATCH);
+                                    "%d.%d.%d", AZNFSCLIENT_VERSION_MAJOR, 
+                                    AZNFSCLIENT_VERSION_MINOR, 
+                                    AZNFSCLIENT_VERSION_PATCH);
         assert(n < sizeof(client_version));
 
         // TODO: Update this string.
         std::string client_id = "12345678";
 
         assert(!mo.export_path.empty());
-        assert(!mo.tenantid.empty());
-        assert(!mo.subscriptionid.empty());
+        assert(!authinfo.tenantid.empty());
+        assert(!authinfo.subscriptionid.empty());
         assert(!mo.authtype.empty());
         assert(strlen(client_version) > 0);
         assert(!client_id.empty());
 
         const int ret = nfs_set_auth_context(nfs_context, 
                                              mo.export_path.c_str(), 
-                                             mo.tenantid.c_str(), 
-                                             mo.subscriptionid.c_str(),
+                                             authinfo.tenantid.c_str(), 
+                                             authinfo.subscriptionid.c_str(),
                                              mo.authtype.c_str(),
                                              client_version,
                                              client_id.c_str());
@@ -67,8 +128,8 @@ bool nfs_connection::open()
                        "exportpath={} tenantid={} subid={} authtype={} " 
                        "clientversion={} clientid={}",
                        mo.export_path.c_str(),
-                       mo.tenantid.c_str(),
-                       mo.subscriptionid.c_str(),
+                       authinfo.tenantid.c_str(),
+                       authinfo.subscriptionid.c_str(),
                        mo.authtype.c_str(),
                        client_version,
                        client_id.c_str());
