@@ -1196,6 +1196,13 @@ static void setattr_callback(
     if (status == 0) {
         if (!res->SETATTR3res_u.resok.obj_wcc.after.attributes_follow) {
             /*
+             * Since the post-op attributes are not populated, flush the
+             * attribute cache so that the attributes are updated from the
+             * server.
+             */
+            inode->invalidate_attribute_cache();
+
+            /*
              * For NFS, the postop attributes are optional, but fuse expects
              * us to pass attributes in the callback. If NFS server fails to
              * return the postop attributes, make a GETATTR RPC request to
