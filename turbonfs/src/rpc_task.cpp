@@ -843,6 +843,15 @@ static void write_iov_callback(
 
     // Success case.
     if (status == 0) {
+        if (!res->WRITE3res_u.resok.file_wcc.after.attributes_follow) {
+            /*
+             * Since the post-op attributes are not populated for the file,
+             * invalidate the cache as the attributes may no longer
+             * be valid since write() would have changed the file attributes.
+             */
+            inode->invalidate_attribute_cache();
+        }
+
         /*
          * WCC implementation.
          * If pre-op attributes indicate that the file changed since we cached,
@@ -1181,6 +1190,16 @@ static void createfile_callback(
             return;
         }
 
+        if (!res->CREATE3res_u.resok.dir_wcc.after.attributes_follow) {
+            /*
+             * Since the post-op attributes are not populated for the parent
+             * directory, invalidate the cache as the attributes may no longer
+             * be valid since create() would have changed the parent directory
+             * attributes.
+             */
+            inode->invalidate_attribute_cache();
+        }
+    
         /*
          * See comment above readdirectory_cache::lookuponly, why we don't need
          * to call UPDATE_INODE_ATTR() to invalidate the readdirectory_cache,
@@ -1339,6 +1358,16 @@ void mknod_callback(
             return;
         }
 
+        if (!res->CREATE3res_u.resok.dir_wcc.after.attributes_follow) {
+            /*
+             * Since the post-op attributes are not populated for the parent
+             * directory, invalidate the cache as the attributes may no longer
+             * be valid since mknod() would have changed the parent directory
+             * attributes.
+             */
+            inode->invalidate_attribute_cache();
+        }
+
         /*
          * See comment above readdirectory_cache::lookuponly, why we don't need
          * to call UPDATE_INODE_ATTR() to invalidate the readdirectory_cache,
@@ -1416,6 +1445,17 @@ void mkdir_callback(
 
             return;
         }
+
+        if (!res->MKDIR3res_u.resok.dir_wcc.after.attributes_follow) {
+            /*
+             * Since the post-op attributes are not populated for the parent
+             * directory, invalidate the cache as the attributes may no longer
+             * be valid since mkdir() would have changed the parent directory
+             * attributes.
+             */
+            inode->invalidate_attribute_cache();
+        }
+    
         /*
          * See comment above readdirectory_cache::lookuponly, why we don't need
          * to call UPDATE_INODE_ATTR() to invalidate the readdirectory_cache,
@@ -1618,6 +1658,16 @@ void symlink_callback(
             task->free_rpc_task();
 
             return;
+        }
+
+        if (!res->SYMLINK3res_u.resok.dir_wcc.after.attributes_follow) {
+            /*
+             * Since the post-op attributes are not populated for the parent
+             * directory, invalidate the cache as the attributes may no longer
+             * be valid since symlink() would have changed the parent directory
+             * attributes.
+             */
+            inode->invalidate_attribute_cache();
         }
 
         /*
