@@ -4,108 +4,39 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <azure/identity/azure_cli_credential.hpp>
-#include <nlohmann/json.hpp>
+#include <netdb.h>
+#include <ifaddrs.h>
 
-using json = nlohmann::json;
+std::string get_ip_address() {
+    struct ifaddrs *ifaddr, *ifa;
+    char host[NI_MAXHOST];
+    std::string ip;
 
-struct auth_info
-{
-    std::string tenantid;
-    std::string subscriptionid;
-    std::string username;
-    std::string usertype;
-};
-
-std::string run_command(const std::string& command)
-{
-    /*
-     * Currently we only use this to run 'az account show' command.
-     * 4KB should be sufficient to store the output of above command.
-     */
-    constexpr size_t BUFFER_SIZE = 4096;
-    std::string output(BUFFER_SIZE, '\0');
-
-    // Open a pipe to execute the command
-    FILE *pipe = ::popen(command.c_str(), "r");
-    if (!pipe) {
-        AZLogError("Failed to open pipe for command execution: {}", command);
+    if (getifaddrs(&ifaddr) == -1) {
+        perror("getifaddrs");
         return "";
     }
 
-    size_t bytes_read = ::fread(const_cast<char *>(output.data()), 1,
-                                BUFFER_SIZE, pipe);
-    if (::ferror(pipe) || (bytes_read <= 0)) {
-        AZLogError("Failed to read from the pipe: {}, command: {}",
-                   bytes_read, command);
-        bytes_read = 0;
-        goto close_pipe;
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+
+        if (ifa->ifa_addr == nullptr) break;
+
+         // Look at only IPv4 addresses. 
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            int result = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
+                                     NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
+            if (result == 0) {
+                ip = host;
+                // Ignore loopback.
+                if (strcmp(ifa->ifa_name, "lo") != 0) {
+                    break;
+                }
+            }
+        }
     }
 
-    // We expect the entire command output to fit in BUFFER_SIZE bytes.
-    if (!::feof(pipe)) {
-        AZLogError("Command output exceeds {} bytes, command: {}",
-                   BUFFER_SIZE, command);
-        bytes_read = 0;
-        goto close_pipe;
-    }
-
-close_pipe:
-    const int ret = ::pclose(pipe);
-    if (ret != 0) {
-        AZLogError("Command failed with return code: {}, command: {}",
-                   ret, command);
-        return "";
-    }
-
-    if (bytes_read > 0) {
-        output.resize(bytes_read);
-        return output;
-    }
-
-    return "";
-}
-
-int get_authinfo_data(struct auth_info& auth_info)
-{
-    const std::string output = run_command("az account show --output json");
-    if (output.empty()) {
-        AZLogError("'az account show --output json' failed to get auth data");
-        return -1;
-    }
-
-    // Extract tenantid, subscriptionid, and user details from the output json.
-    try {
-        const auto json_data = json::parse(output);
-
-        auth_info.tenantid = json_data["tenantId"].get<std::string>();
-        auth_info.subscriptionid = json_data["id"].get<std::string>();
-        auth_info.username = json_data["user"]["name"].get<std::string>();
-        auth_info.usertype = json_data["user"]["type"].get<std::string>();
-    } catch (json::parse_error& ev) {
-        AZLogError("Failed to parse json: {}, error: {}", output, ev.what());
-        return -1;
-    }
-
-    // Caller expects valid values for tenantid and subscriptionid.
-    if (auth_info.tenantid.empty() || auth_info.subscriptionid.empty())
-        AZLogError("'az account show --output json' returned: "
-                   "tenantid: {} subscriptionid: {} username: {} usertype: {}",
-                   auth_info.tenantid,
-                   auth_info.subscriptionid,
-                   auth_info.username,
-                   auth_info.usertype);
-        return -1;
-    }
-
-    AZLogDebug("'az account show --output json' returned: "
-               "tenantid: {} subscriptionid: {} username: {} usertype: {}",
-               auth_info.tenantid,
-               auth_info.subscriptionid,
-               auth_info.username,
-               auth_info.usertype);
-
-    return 0;
+    freeifaddrs(ifaddr);
+    return ip;
 }
 
 bool nfs_connection::open()
@@ -138,14 +69,6 @@ bool nfs_connection::open()
     nfs_destroy_url(url);
 
     if (mo.auth) {
-
-        struct auth_info auth_info;
-
-        if (get_authinfo_data(auth_info) == -1) {
-            AZLogError("Failed to get auth data from az cli");
-            goto destroy_context;
-        }
-
         // 16 should be sufficient to hold the version string.
         char client_version[16];
 
@@ -156,30 +79,23 @@ bool nfs_connection::open()
                                     AZNFSCLIENT_VERSION_PATCH);
         assert(n < sizeof(client_version));
 
-        // TODO: Update this string.
-        std::string client_id = "12345678";
+        std::string client_id = get_ip_address();
 
         assert(!mo.export_path.empty());
-        assert(!auth_info.tenantid.empty());
-        assert(!auth_info.subscriptionid.empty());
         assert(!mo.authtype.empty());
         assert(strlen(client_version) > 0);
         assert(!client_id.empty());
 
         const int ret = nfs_set_auth_context(nfs_context,
                                              mo.export_path.c_str(),
-                                             auth_info.tenantid.c_str(),
-                                             auth_info.subscriptionid.c_str(),
                                              mo.authtype.c_str(),
                                              client_version,
                                              client_id.c_str());
         if (ret != 0) {
             AZLogError("Failed to set auth values in nfs context, "
-                       "exportpath={} tenantid={} subid={} authtype={} "
+                       "exportpath={} authtype={} "
                        "clientversion={} clientid={}",
                        mo.export_path.c_str(),
-                       auth_info.tenantid.c_str(),
-                       auth_info.subscriptionid.c_str(),
                        mo.authtype.c_str(),
                        client_version,
                        client_id.c_str());
