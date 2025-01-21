@@ -904,6 +904,15 @@ static void write_iov_callback(
             // Hand over the remaining bciov to the new write_task.
             assert(write_task->rpc_api->pvt == nullptr);
             write_task->rpc_api->pvt = task->rpc_api->pvt;
+
+            /*
+             * If this write_rpc issued as part of a another write task, then
+             * set the parent_task.
+             */
+            if (task->rpc_api->parent_task) {
+                write_task->rpc_api->parent_task = task->rpc_api->parent_task;
+            }
+
             task->rpc_api->pvt = nullptr;
 
             // Issue write for the remaining data.
