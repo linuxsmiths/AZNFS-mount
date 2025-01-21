@@ -1514,6 +1514,7 @@ void nfs_client::jukebox_write(struct api_task_info *rpc_api)
     write_task->rpc_api->pvt = rpc_api->pvt;
     rpc_api->pvt = nullptr;
 
+#if 0
     /*
      * We currently only support buffered writes where the original fuse write
      * task completes after copying data to the bytes_chunk_cache and later
@@ -1523,6 +1524,14 @@ void nfs_client::jukebox_write(struct api_task_info *rpc_api)
      * to be completed once the underlying tasks complete.
      */
     assert(rpc_api->parent_task == nullptr);
+#endif
+    if (rpc_api->parent_task != nullptr) {
+        assert(rpc_api->parent_task->magic == RPC_TASK_MAGIC);
+        assert(rpc_api->parent_task->get_op_type() == FUSE_WRITE);
+        assert(rpc_api->parent_task->num_ongoing_backend_writes > 0);
+
+        write_task->rpc_api->parent_task = rpc_api->parent_task;
+    }
 
     write_task->issue_write_rpc();
 }

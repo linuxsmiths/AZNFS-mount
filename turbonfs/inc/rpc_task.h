@@ -1787,6 +1787,20 @@ public:
     std::atomic<int> read_status = 0;
 
     /*
+     * Valid only for write RPC tasks.
+     * It may happen when client write call came we already under memory
+     * pressure, completing this write may cause more memory pressure, so we
+     * may want to throttle this write. We issue flush for all dirty writes
+     * as child tasks of this write task, once the flush completes we can
+     * complete this write as well.
+     *
+     * Note: As we don't wait for flush to complete in fuse thread context,
+     *       that thread freed for another work as soon we issue write rpc.
+     *       The incoming write request completes in libnfs context.
+     */
+    std::atomic<int> num_ongoing_backend_writes = 0;
+
+    /*
      * This is currently valid only for reads.
      * This contains vector of byte chunks which is returned by making a call
      * to bytes_chunk_cache::get().

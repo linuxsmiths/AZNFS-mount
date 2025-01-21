@@ -954,6 +954,23 @@ static void write_iov_callback(
     delete bciov;
     task->rpc_api->pvt = nullptr;
 
+    /*
+     * If this write_rpc issued as part of a another write task, then
+     * decrement the ongoing write count and if it is the last write
+     * then complete the parent task and send response to the client.
+     */
+    if (task->rpc_api->parent_task) {
+        struct rpc_task *parent_task = task->rpc_api->parent_task;
+
+        assert(parent_task->magic == RPC_TASK_MAGIC);
+        assert(parent_task->get_op_type() == FUSE_WRITE);
+        assert(parent_task->num_ongoing_backend_writes > 0);
+
+        if (--parent_task->num_ongoing_backend_writes == 0) {
+            parent_task->reply_write(parent_task->rpc_api->write_task.get_size());
+        }
+    }
+
     // Release the task.
     task->free_rpc_task();
 }
@@ -2031,7 +2048,7 @@ void rpc_task::run_write()
      * This is not correct as such reads issued after successful write, are
      * valid and should return 0 bytes for the sparse range.
      */
-    if (!sparse_write) {
+    if (!sparse_write && !inode->get_filecache()->do_inline_write()) {
         /*
          * If the extent size exceeds the max allowed dirty size as returned by
          * max_dirty_extent_bytes(), then it's time to flush the extent.
@@ -2091,18 +2108,20 @@ void rpc_task::run_write()
                    ino, sparse_write, (extent_right - extent_left),
                    extent_left, extent_right);
 
-        const int err = inode->flush_cache_and_wait(extent_left, extent_right);
-        if (err == 0) {
+        inode->flush_lock();
+        std::vector<bytes_chunk> bc_vec =
+            inode->get_filecache()->get_dirty_nonflushing_bcs();
+
+        if (bc_vec.empty()) {
+            inode->flush_unlock();
+            AZLogInfo("[{}] No dirty data to flush, replying write", ino);
             reply_write(length);
             return;
-        } else {
-            AZLogError("[{}] Inline write, {} bytes extent @ [{}, {}), failed "
-                       "with err {}",
-                       ino, (extent_right - extent_left),
-                       extent_left, extent_right, err);
-            reply_error(err);
-            return;
         }
+
+        inode->sync_membufs(bc_vec, false /* is_flush */, this);
+        inode->flush_unlock();
+        return;
     }
 
     /*

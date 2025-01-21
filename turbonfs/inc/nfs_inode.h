@@ -1336,7 +1336,8 @@ public:
      * All contiguous dirty membufs are clubbed together and sent to the
      * NFS server in a single write call.
      */
-    void sync_membufs(std::vector<bytes_chunk> &bcs, bool is_flush);
+    void sync_membufs(std::vector<bytes_chunk> &bcs, bool is_flush,
+                        struct rpc_task *parent_task = nullptr);
 
     /**
      * Called when last open fd is closed for a file/dir.
