@@ -906,8 +906,9 @@ static void write_iov_callback(
             write_task->rpc_api->pvt = task->rpc_api->pvt;
 
             /*
-             * If this write_rpc issued as part of a another write task, then
-             * set the parent_task.
+             * If this (child) write_rpc was issued as part of a another
+             * (parent) write task, then set the parent_task in the new
+             * child write too.
              */
             if (task->rpc_api->parent_task) {
                 write_task->rpc_api->parent_task = task->rpc_api->parent_task;
@@ -964,21 +965,23 @@ static void write_iov_callback(
     task->rpc_api->pvt = nullptr;
 
     /*
-     * If this write_rpc issued as part of a another write task, then
-     * decrement the ongoing write count and if it is the last write
-     * then complete the parent task and send response to the client.
+     * If this write_rpc was issued as part of a parent write task, then
+     * decrement the ongoing write count and if it is the last write then
+     * complete the parent task. This will call the fuse callback.
      */
     if (task->rpc_api->parent_task) {
         struct rpc_task *parent_task = task->rpc_api->parent_task;
 
-        assert(parent_task->rpc_api->write_task.is_fe());
         assert(parent_task->magic == RPC_TASK_MAGIC);
         assert(parent_task->get_op_type() == FUSE_WRITE);
+        assert(parent_task->rpc_api->write_task.is_fe());
         assert(parent_task->num_ongoing_backend_writes > 0);
 
         if (--parent_task->num_ongoing_backend_writes == 0) {
             if (inode->get_write_error() == 0) {
-                parent_task->reply_write(parent_task->rpc_api->write_task.get_size());
+                assert(parent_task->rpc_api->write_task.get_size() > 0);
+                parent_task->reply_write(
+                        parent_task->rpc_api->write_task.get_size());
             } else {
                 parent_task->reply_error(inode->get_write_error());
             }
@@ -1005,12 +1008,19 @@ void rpc_task::issue_write_rpc()
     assert(get_op_type() == FUSE_WRITE);
     // Must only be called for a BE task.
     assert(rpc_api->write_task.is_be());
-    [[maybe_unused]] const struct rpc_task *parent_task = rpc_api->parent_task;
+    [[maybe_unused]]
+    const struct rpc_task *parent_task = rpc_api->parent_task;
 
-    assert((parent_task == nullptr) ||
-           parent_task->rpc_api->write_task.is_fe());
-    assert((parent_task == nullptr) ||
-           parent_task->num_ongoing_backend_writes > 0);
+    /*
+     * If parent_task is set, it must refer to the fuse write task that
+     * trigerred the inline sync.
+     */
+    if (parent_task) {
+        // Must be a frontend write task.
+        assert(parent_task->get_op_type() == FUSE_WRITE);
+        assert(parent_task->rpc_api->write_task.is_fe());
+        assert(parent_task->num_ongoing_backend_writes > 0);
+    }
 
     const fuse_ino_t ino = rpc_api->write_task.get_ino();
     struct nfs_inode *inode = get_client()->get_nfs_inode_from_ino(ino);

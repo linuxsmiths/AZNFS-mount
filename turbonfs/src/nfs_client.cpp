@@ -1522,16 +1522,23 @@ void nfs_client::jukebox_write(struct api_task_info *rpc_api)
      * job is to ensure they sync the part of the blob they are assigned.
      * They don't need a parent_task which is usually the fuse task that needs
      * to be completed once the underlying tasks complete.
+     *
+     * Note: This is no longer true, see parent_task argument to sync_membufs().
      */
     assert(rpc_api->parent_task == nullptr);
 #endif
+
     /*
-     * If this write task is a child of a fuse write task, then
-     * set the parent_task of this write task to the parent fuse write task.
+     * If the write task that failed with jukebox is a child of a fuse write
+     * task, then we have to complete the parent write task when the child
+     * and all children complete. We need to set the parent_task of the retried
+     * task too.
      */
     if (rpc_api->parent_task != nullptr) {
         assert(rpc_api->parent_task->magic == RPC_TASK_MAGIC);
         assert(rpc_api->parent_task->get_op_type() == FUSE_WRITE);
+        assert(rpc_api->parent_task->rpc_api->write_task.is_fe());
+        // At least this child task has not completed.
         assert(rpc_api->parent_task->num_ongoing_backend_writes > 0);
 
         write_task->rpc_api->parent_task = rpc_api->parent_task;
