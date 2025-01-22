@@ -1525,6 +1525,10 @@ void nfs_client::jukebox_write(struct api_task_info *rpc_api)
      */
     assert(rpc_api->parent_task == nullptr);
 #endif
+    /*
+     * If this write task is a child of a fuse write task, then
+     * set the parent_task of this write task to the parent fuse write task.
+     */
     if (rpc_api->parent_task != nullptr) {
         assert(rpc_api->parent_task->magic == RPC_TASK_MAGIC);
         assert(rpc_api->parent_task->get_op_type() == FUSE_WRITE);

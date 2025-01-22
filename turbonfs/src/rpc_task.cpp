@@ -971,12 +971,17 @@ static void write_iov_callback(
     if (task->rpc_api->parent_task) {
         struct rpc_task *parent_task = task->rpc_api->parent_task;
 
+        assert(parent_task->rpc_api->write_task.is_fe());
         assert(parent_task->magic == RPC_TASK_MAGIC);
         assert(parent_task->get_op_type() == FUSE_WRITE);
         assert(parent_task->num_ongoing_backend_writes > 0);
 
         if (--parent_task->num_ongoing_backend_writes == 0) {
-            parent_task->reply_write(parent_task->rpc_api->write_task.get_size());
+            if (inode->get_write_error() == 0) {
+                parent_task->reply_write(parent_task->rpc_api->write_task.get_size());
+            } else {
+                parent_task->reply_error(inode->get_write_error());
+            }
         }
     }
 
@@ -1000,6 +1005,12 @@ void rpc_task::issue_write_rpc()
     assert(get_op_type() == FUSE_WRITE);
     // Must only be called for a BE task.
     assert(rpc_api->write_task.is_be());
+    [[maybe_unused]] const struct rpc_task *parent_task = rpc_api->parent_task;
+
+    assert((parent_task == nullptr) ||
+           parent_task->rpc_api->write_task.is_fe());
+    assert((parent_task == nullptr) ||
+           parent_task->num_ongoing_backend_writes > 0);
 
     const fuse_ino_t ino = rpc_api->write_task.get_ino();
     struct nfs_inode *inode = get_client()->get_nfs_inode_from_ino(ino);
@@ -1949,8 +1960,6 @@ void rpc_task::run_access()
         }
     } while (rpc_retry);
 }
-
-
 
 void rpc_task::run_write()
 {

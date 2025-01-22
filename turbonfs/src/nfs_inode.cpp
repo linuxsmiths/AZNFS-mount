@@ -380,6 +380,8 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec, bool is_flush,
 {
     assert((parent_task == nullptr) ||
      (parent_task->get_op_type() == FUSE_WRITE));
+    assert((parent_task == nullptr) ||
+     (parent_task->rpc_api->write_task.is_fe()));
 
     if (bc_vec.empty()) {
         return;
