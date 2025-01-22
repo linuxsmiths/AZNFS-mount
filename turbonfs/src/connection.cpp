@@ -6,37 +6,58 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <ifaddrs.h>
+#include <arpa/inet.h>
 
-std::string get_ip_address() {
-    struct ifaddrs *ifaddr, *ifa;
-    char host[NI_MAXHOST];
-    std::string ip;
+/*
+ * Return a unique id to identify this client to the server.
+ * As of now we use the interface IPv4 address string, 
+ * but it can be changed to anything else in future.
+ */
+std::string get_clientid() {
+    struct ifaddrs* ifaddr = nullptr;
+    struct ifaddrs* ifa = nullptr;
+    char ip[INET_ADDRSTRLEN] = {0};
+    constexpr size_t MAX_IP_LENGTH = 64;
 
-    if (getifaddrs(&ifaddr) == -1) {
-        perror("getifaddrs");
+    // Get the list of network interfaces
+    if (::getifaddrs(&ifaddr) == -1) {
+        AZLogError("Failed to get network interfaces: {}", strerror(errno));
         return "";
     }
 
     for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
 
-        if (ifa->ifa_addr == nullptr) break;
+        if (ifa->ifa_addr == nullptr) continue;
+        // Skip non IPv4 address. 
+        if (ifa->ifa_addr->sa_family != AF_INET) continue;
+        // Skip loopback interface.
+        if (::strcmp(ifa->ifa_name, "lo") == 0) continue;
 
-         // Look at only IPv4 addresses. 
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-            int result = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
-                                     NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
-            if (result == 0) {
-                ip = host;
-                // Ignore loopback.
-                if (strcmp(ifa->ifa_name, "lo") != 0) {
-                    break;
-                }
-            }
+        struct sockaddr_in* addr = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+
+        // Convert binary address to string.
+        if (::inet_ntop(AF_INET, &addr->sin_addr, ip, INET_ADDRSTRLEN) == nullptr) {
+            AZLogError("Failed to convert binary IP to string: {}", strerror(errno));
+            continue;
         }
+
+        if (strlen(ip) >= MAX_IP_LENGTH) {
+            AZLogError( "IP address {} exceeds the maximum encodable size of {} bytes on interface {}.",
+                         ip, MAX_IP_LENGTH, ifa->ifa_name);
+            ip[0] = '\0';
+        } else {
+            AZLogDebug("Found IPv4 address {} on interface {}", ip, ifa->ifa_name);
+        }
+        break;
     }
 
     freeifaddrs(ifaddr);
-    return ip;
+
+    if (ip[0] == '\0') {
+        AZLogError("No valid IPv4 address found on non-loopback interfaces.");
+    }
+
+    return std::string(ip);
 }
 
 bool nfs_connection::open()
@@ -79,7 +100,7 @@ bool nfs_connection::open()
                                     AZNFSCLIENT_VERSION_PATCH);
         assert(n < sizeof(client_version));
 
-        std::string client_id = get_ip_address();
+        std::string client_id = get_clientid();
 
         assert(!mo.export_path.empty());
         assert(!mo.authtype.empty());

@@ -473,6 +473,7 @@ auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth)
 
     if (get_authinfo_data(auth_info) == -1) {
         AZLogError("Failed to get auth data from az cli");
+        free(cb_res);
         return nullptr;
     }
 
