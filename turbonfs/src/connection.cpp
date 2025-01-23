@@ -17,7 +17,7 @@ std::string get_clientid() {
     struct ifaddrs *ifaddr = nullptr;
     struct ifaddrs *ifa = nullptr;
     char ip[INET_ADDRSTRLEN] = {0};
-    static int64_t random_id = get_current_usecs();
+    static std::string client_id = std::to_string(get_current_usecs());
 
     /*
      * Whatever is encoded here should not exceed the maximum possible that can be 
@@ -28,7 +28,7 @@ std::string get_clientid() {
     // Get the list of network interfaces
     if (::getifaddrs(&ifaddr) == -1) {
         AZLogError("Failed to get network interfaces: {}", strerror(errno));
-        return "";
+        goto failed_get_clientip;
     }
 
     for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
@@ -47,24 +47,26 @@ std::string get_clientid() {
         // Convert binary address to string.
         if (::inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip)) == nullptr) {
             AZLogError("Failed to convert binary IP to string: {}", strerror(errno));
-            continue;
+            goto failed_get_clientip;
         }
-
-        // We cannot send clientid of size more than MAX_IP_LENGTH.
-        assert(::strlen(ip) <= MAX_IP_LENGTH);
-
-        AZLogDebug("Using IPv4 address {} from interface {} as clientid", ip, ifa->ifa_name);
         break;
     }
 
     freeifaddrs(ifaddr);
 
     if (ip[0] == '\0') {
-        AZLogError("No valid IPv4 address found on non-loopback interfaces.");
-        return "";
+        AZLogError("No valid IPv4 address found.");
+        goto failed_get_clientip;
     }
 
-    return std::string(ip) + "-" + std::to_string(random_id);
+    client_id += std::string(ip);
+
+failed_get_clientip:
+    // We cannot send clientid of size more than MAX_IP_LENGTH.
+    assert(client_id.length() <= MAX_IP_LENGTH);
+    AZLogDebug("Using clientid address {}", client_id);
+
+    return client_id;
 }
 
 bool nfs_connection::open()
