@@ -123,7 +123,7 @@ struct mount_options
     {
         std::string url(1024, '\0');
         // TODO: Take it from aznfsc_cfg.
-        const int debug = 2;
+        const int debug = 1;
 
         /*
          * For Blob NFS force nfsport and mountport to avoid portmapper
