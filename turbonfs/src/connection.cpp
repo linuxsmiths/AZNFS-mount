@@ -14,9 +14,15 @@
  * but it can be changed to anything else in future.
  */
 std::string get_clientid() {
-    struct ifaddrs* ifaddr = nullptr;
-    struct ifaddrs* ifa = nullptr;
+    struct ifaddrs *ifaddr = nullptr;
+    struct ifaddrs *ifa = nullptr;
     char ip[INET_ADDRSTRLEN] = {0};
+    static int64_t random_id = get_current_usecs();
+
+    /*
+     * Whatever is encoded here should not exceed the maximum possible that can be 
+     * encoded in AZAuth RPC
+     */
     constexpr size_t MAX_IP_LENGTH = 64;
 
     // Get the list of network interfaces
@@ -27,27 +33,27 @@ std::string get_clientid() {
 
     for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
 
-        if (ifa->ifa_addr == nullptr) continue;
+        if (ifa->ifa_addr == nullptr)
+            continue;
         // Skip non IPv4 address. 
-        if (ifa->ifa_addr->sa_family != AF_INET) continue;
+        if (ifa->ifa_addr->sa_family != AF_INET) 
+            continue;
         // Skip loopback interface.
-        if (::strcmp(ifa->ifa_name, "lo") == 0) continue;
+        if (::strcmp(ifa->ifa_name, "lo") == 0) 
+            continue;
 
-        struct sockaddr_in* addr = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+        struct sockaddr_in *addr = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
 
         // Convert binary address to string.
-        if (::inet_ntop(AF_INET, &addr->sin_addr, ip, INET_ADDRSTRLEN) == nullptr) {
+        if (::inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip)) == nullptr) {
             AZLogError("Failed to convert binary IP to string: {}", strerror(errno));
             continue;
         }
 
-        if (strlen(ip) >= MAX_IP_LENGTH) {
-            AZLogError( "IP address {} exceeds the maximum encodable size of {} bytes on interface {}.",
-                         ip, MAX_IP_LENGTH, ifa->ifa_name);
-            ip[0] = '\0';
-        } else {
-            AZLogDebug("Found IPv4 address {} on interface {}", ip, ifa->ifa_name);
-        }
+        // We cannot send clientid of size more than MAX_IP_LENGTH.
+        assert(::strlen(ip) <= MAX_IP_LENGTH);
+
+        AZLogDebug("Using IPv4 address {} from interface {} as clientid", ip, ifa->ifa_name);
         break;
     }
 
@@ -55,9 +61,10 @@ std::string get_clientid() {
 
     if (ip[0] == '\0') {
         AZLogError("No valid IPv4 address found on non-loopback interfaces.");
+        return "";
     }
 
-    return std::string(ip);
+    return std::string(ip) + "-" + std::to_string(random_id);
 }
 
 bool nfs_connection::open()
