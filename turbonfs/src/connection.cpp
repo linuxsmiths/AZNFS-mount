@@ -64,7 +64,7 @@ std::string get_clientid() {
 failed_get_clientip:
     // We cannot send clientid of size more than MAX_IP_LENGTH.
     assert(client_id.length() <= MAX_IP_LENGTH);
-    AZLogDebug("Using clientid address {}", client_id);
+    AZLogDebug("Using clientid {}", client_id);
 
     return client_id;
 }
