@@ -958,7 +958,7 @@ static void write_iov_callback(
         /*
          * on_io_fail() will clear flushing from all remaining membufs.
          */
-        bciov->on_io_fail();
+        bciov->on_io_fail(status);
     }
 
     delete bciov;
@@ -2140,13 +2140,15 @@ void rpc_task::run_write()
              * inline write before us, job done, return.
              */
             inode->flush_unlock();
-
-            AZLogDebug("[{}] <inline write> Some other thread performed the "
-                       "inline write, nothing to do", ino);
-
-            // Complete the application write and free up the fuse thread.
-            reply_write(length);
-            return;
+            if (inode->get_filecache()->add_waiting_task_membuf(offset, length, this)) {
+                AZLogInfo("[{}] Inline write, membuf not flushed, write will be"
+                 " completed when membuf flushed", ino);
+                return;
+            } else {
+                AZLogInfo("[{}] Inline write, Membuf already flushed completing the write", ino);
+                reply_write(length);
+                return;
+            }
         }
 
         /*

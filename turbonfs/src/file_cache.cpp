@@ -706,6 +706,20 @@ void membuf::clear_inuse()
     inuse--;
 }
 
+void membuf::add_waiting_task(struct rpc_task *task)
+{
+    assert(task != nullptr);
+    waiting_tasks.push_back(task);
+}
+
+std::vector<struct rpc_task *> membuf::get_waiting_tasks()
+{
+    std::unique_lock<std::mutex> _lock(waiting_tasks_lock);
+    std::vector<struct rpc_task *> tasks;
+    tasks.swap(waiting_tasks);
+    return tasks;
+}
+
 bytes_chunk::bytes_chunk(bytes_chunk_cache *_bcc,
                          uint64_t _offset,
                          uint64_t _length) :
@@ -2325,6 +2339,27 @@ std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_nonflushing_bcs_range(
     }
 
     return bc_vec;
+}
+
+bool bytes_chunk_cache::add_waiting_task_membuf(uint64_t offset, uint64_t length, struct rpc_task *task)
+{
+    const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
+    auto it = chunkmap.lower_bound(offset);
+
+    while (it != chunkmap.cend() && it->first < (offset + length)) {
+        struct bytes_chunk& bc = it->second;
+        struct membuf *mb = bc.get_membuf();
+        {
+            std::unique_lock<std::mutex> _lock(mb->waiting_tasks_lock);
+            if (mb->is_dirty()) {
+                mb->add_waiting_task(task);
+                return true;
+            }
+        }
+        ++it;
+    }
+
+    return false;
 }
 
 std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_bc_range(

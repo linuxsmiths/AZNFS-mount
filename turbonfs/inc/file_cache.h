@@ -17,6 +17,7 @@
 #include "aznfsc.h"
 
 struct nfs_inode;
+struct rpc_task;
 
 /*
  * Reminder to audit use of asserts to ensure we don't depend on assert
@@ -216,6 +217,9 @@ struct membuf
     uint8_t *buffer = nullptr;
     uint8_t *allocated_buffer = nullptr;
 
+    std::vector<struct rpc_task *> waiting_tasks;
+    std::mutex waiting_tasks_lock;
+
     /*
      * If is_file_backed() is true then 'allocated_buffer' is the mmap()ed
      * address o/w it's the heap allocation address.
@@ -303,6 +307,9 @@ struct membuf
     void set_locked();
     void clear_locked();
     bool try_lock();
+
+    void add_waiting_task(struct rpc_task *task);
+    std::vector<struct rpc_task *> get_waiting_tasks();
 
     /**
      * A membuf is marked dirty when the membuf data is updated, making it
@@ -1169,6 +1176,7 @@ public:
         return bytes_truncated;
     }
 
+    bool add_waiting_task_membuf(uint64_t offset, uint64_t length, struct rpc_task *task);
     /*
      * Returns all dirty chunks for a given range in chunkmap.
      * Before returning it increases the inuse count of underlying membuf(s).
