@@ -482,6 +482,7 @@ auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth)
                auth_info.subscriptionid.c_str());
 
     assert(!auth_info.tenantid.empty());
+    assert(!auth_info.subscriptionid.empty());
 
     Azure::Core::Credentials::AccessToken token;
 
