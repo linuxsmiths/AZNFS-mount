@@ -87,6 +87,11 @@ membuf::~membuf()
     assert(!is_inuse());
 
     /*
+     * waiting_tasks must be empty, all tasks must have been dequeued.
+     */
+    assert(waiting_tasks == nullptr);
+
+    /*
      * dirty membuf must not be destroyed, unless it's due to file being
      * truncated, in which case we don't care about losing the unflushed
      * data.
@@ -706,17 +711,21 @@ void membuf::clear_inuse()
     inuse--;
 }
 
-void membuf::add_waiting_task(struct rpc_task *task)
-{
-    assert(task != nullptr);
-    waiting_tasks.push_back(task);
-}
-
 std::vector<struct rpc_task *> membuf::get_waiting_tasks()
 {
     std::unique_lock<std::mutex> _lock(waiting_tasks_lock);
     std::vector<struct rpc_task *> tasks;
-    tasks.swap(waiting_tasks);
+
+    if (waiting_tasks) {
+        tasks.swap(*waiting_tasks);
+
+        /*
+         * Free the waiting_tasks vector.
+         */
+        delete waiting_tasks;
+        waiting_tasks = nullptr;
+    }
+
     return tasks;
 }
 
@@ -2345,18 +2354,26 @@ bool bytes_chunk_cache::add_waiting_task_membuf(uint64_t offset, uint64_t length
 {
     const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
     auto it = chunkmap.lower_bound(offset);
+    struct bytes_chunk *prev_bc = nullptr;
 
+    // Get the last bc for the given range.
     while (it != chunkmap.cend() && it->first < (offset + length)) {
-        struct bytes_chunk& bc = it->second;
-        struct membuf *mb = bc.get_membuf();
-        {
-            std::unique_lock<std::mutex> _lock(mb->waiting_tasks_lock);
-            if (mb->is_dirty()) {
-                mb->add_waiting_task(task);
-                return true;
-            }
-        }
+        struct bytes_chunk *bc = &(it->second);
+        prev_bc = bc;
         ++it;
+    }
+
+    if (prev_bc != nullptr) {
+        struct membuf *mb = prev_bc->get_membuf();
+        std::unique_lock<std::mutex> _lock2(mb->waiting_tasks_lock);
+        if (mb->is_dirty()) {
+            if (mb->waiting_tasks == nullptr) {
+                mb->waiting_tasks = new std::vector<struct rpc_task *>();
+            }
+
+            mb->waiting_tasks->emplace_back(task);
+            return true;
+        }
     }
 
     return false;

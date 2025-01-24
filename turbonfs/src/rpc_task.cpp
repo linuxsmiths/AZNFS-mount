@@ -2319,11 +2319,11 @@ void rpc_task::run_write()
              */
             inode->flush_unlock();
             if (inode->get_filecache()->add_waiting_task_membuf(offset, length, this)) {
-                AZLogInfo("[{}] Inline write, membuf not flushed, write will be"
+                AZLogDebug("[{}] Inline write, membuf not flushed, write will be"
                  " completed when membuf flushed", ino);
                 return;
             } else {
-                AZLogInfo("[{}] Inline write, Membuf already flushed completing the write", ino);
+                AZLogDebug("[{}] Inline write, Membuf already flushed completing the write", ino);
                 reply_write(length);
                 return;
             }

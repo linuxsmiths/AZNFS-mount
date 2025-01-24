@@ -217,7 +217,7 @@ struct membuf
     uint8_t *buffer = nullptr;
     uint8_t *allocated_buffer = nullptr;
 
-    std::vector<struct rpc_task *> waiting_tasks;
+    std::vector<struct rpc_task *> *waiting_tasks = nullptr;
     std::mutex waiting_tasks_lock;
 
     /*
