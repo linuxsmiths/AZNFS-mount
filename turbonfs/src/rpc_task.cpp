@@ -861,6 +861,18 @@ void bc_iovec::on_io_complete(uint64_t bytes_completed, bool is_unstable_write)
             mb->clear_dirty();
             mb->clear_flushing();
 
+            /*
+             * Check if any task waiting for this membuf to be flushed.
+             */
+            std::vector<struct rpc_task *> tvec = mb->get_waiting_tasks_flush();
+            for (auto task : tvec) {
+                assert(task->magic == RPC_TASK_MAGIC);
+                assert(task->get_op_type() == FUSE_WRITE);
+                assert(task->rpc_api->write_task.is_fe());
+
+                task->reply_write(task->rpc_api->write_task.get_size());
+            }
+
             if (is_unstable_write) {
                 mb->set_commit_pending();
             }
@@ -873,18 +885,6 @@ void bc_iovec::on_io_complete(uint64_t bytes_completed, bool is_unstable_write)
 
             assert(bytes_completed >= bc_len);
             bytes_completed -= bc_len;
-
-            /*
-             * Check if any task waiting for this membuf to be flushed.
-             */
-            std::vector<struct rpc_task *> tvec = mb->get_waiting_tasks();
-            for (auto task : tvec) {
-                assert(task->magic == RPC_TASK_MAGIC);
-                assert(task->get_op_type() == FUSE_WRITE);
-                assert(task->rpc_api->write_task.is_fe());
-
-                task->reply_write(task->rpc_api->write_task.get_size());
-            }
 
             // Remove the bc from bcq.
             bcq.pop();
@@ -952,18 +952,11 @@ void bc_iovec::on_io_fail(int status)
         assert(mb->is_flushing() && mb->is_dirty() && mb->is_uptodate());
 
         mb->clear_flushing();
-        mb->clear_locked();
-        mb->clear_inuse();
-        iov++;
-        assert(iovcnt > 0);
-        iovcnt--;
-        offset += bc_len;
-        length -= bc_len;
 
         /*
          * Check if any task waiting for this membuf to be flushed.
          */
-        std::vector<struct rpc_task *> tvec = mb->get_waiting_tasks();
+        std::vector<struct rpc_task *> tvec = mb->get_waiting_tasks_flush();
         for (auto task : tvec) {
             assert(task->magic == RPC_TASK_MAGIC);
             assert(task->get_op_type() == FUSE_WRITE);
@@ -971,6 +964,14 @@ void bc_iovec::on_io_fail(int status)
 
             task->reply_error(status);
         }
+
+        mb->clear_locked();
+        mb->clear_inuse();
+        iov++;
+        assert(iovcnt > 0);
+        iovcnt--;
+        offset += bc_len;
+        length -= bc_len;
 
         // Remove the bc from bcq.
         bcq.pop();

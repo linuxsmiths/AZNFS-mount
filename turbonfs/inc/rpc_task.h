@@ -286,7 +286,6 @@ private:
  */
 #define BC_IOVEC_MAX_VECTORS 1000
 
-
 struct bc_iovec
 {
     const uint32_t magic = BC_IOVEC_MAGIC;

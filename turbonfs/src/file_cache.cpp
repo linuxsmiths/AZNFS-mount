@@ -87,9 +87,9 @@ membuf::~membuf()
     assert(!is_inuse());
 
     /*
-     * waiting_tasks must be empty, all tasks must have been dequeued.
+     * waiting_tasks_flush must be empty, all tasks must have been dequeued.
      */
-    assert(waiting_tasks == nullptr);
+    assert(waiting_tasks_flush == nullptr);
 
     /*
      * dirty membuf must not be destroyed, unless it's due to file being
@@ -711,19 +711,27 @@ void membuf::clear_inuse()
     inuse--;
 }
 
-std::vector<struct rpc_task *> membuf::get_waiting_tasks()
+std::vector<struct rpc_task *> membuf::get_waiting_tasks_flush()
 {
-    std::unique_lock<std::mutex> _lock(waiting_tasks_lock);
+    /*
+     * assert for !is_dirty() not added as in case of write failure
+     * we don't clear dirty flag, so we can have waiting tasks even
+     * when membuf is dirty.
+     */
+    assert(is_locked());
+    assert(!is_flushing());
+
+    std::unique_lock<std::mutex> _lock(waiting_tasks_flush_lock);
     std::vector<struct rpc_task *> tasks;
 
-    if (waiting_tasks) {
-        tasks.swap(*waiting_tasks);
+    if (waiting_tasks_flush) {
+        tasks.swap(*waiting_tasks_flush);
 
         /*
-         * Free the waiting_tasks vector.
+         * Free the waiting_tasks_flush vector.
          */
-        delete waiting_tasks;
-        waiting_tasks = nullptr;
+        delete waiting_tasks_flush;
+        waiting_tasks_flush = nullptr;
     }
 
     return tasks;
@@ -2365,13 +2373,13 @@ bool bytes_chunk_cache::add_waiting_task_membuf(uint64_t offset, uint64_t length
 
     if (prev_bc != nullptr) {
         struct membuf *mb = prev_bc->get_membuf();
-        std::unique_lock<std::mutex> _lock2(mb->waiting_tasks_lock);
+        std::unique_lock<std::mutex> _lock2(mb->waiting_tasks_flush_lock);
         if (mb->is_dirty()) {
-            if (mb->waiting_tasks == nullptr) {
-                mb->waiting_tasks = new std::vector<struct rpc_task *>();
+            if (mb->waiting_tasks_flush == nullptr) {
+                mb->waiting_tasks_flush = new std::vector<struct rpc_task *>();
             }
 
-            mb->waiting_tasks->emplace_back(task);
+            mb->waiting_tasks_flush->emplace_back(task);
             return true;
         }
     }
