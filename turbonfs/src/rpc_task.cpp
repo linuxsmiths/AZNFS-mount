@@ -1859,7 +1859,7 @@ void rename_callback(
         if (status == 0) {
             if (!res->RENAME3res_u.resok.fromdir_wcc.after.attributes_follow) {
                 AZLogDebug("[{}] Postop attributes not received for rename, "
-                       "invalidating old parent attribute cache", parent_ino);
+                           "invalidating old parent attribute cache", parent_ino);
 
                 /*
                  * Since the post-op attributes are not populated for the parent
