@@ -712,6 +712,36 @@ void membuf::clear_inuse()
     inuse--;
 }
 
+std::vector<struct rpc_task *> membuf::get_commit_waiters()
+{
+    /*
+     * We cannot assert for !is_dirty() as in case of write failure
+     * we complete flush_waiters w/o clearing dirty flag.
+     */
+    assert(is_inuse());
+    assert(is_locked());
+    assert(!is_flushing());
+    assert(!is_commit_pending());
+
+    std::unique_lock<std::mutex> _lock(commit_waiters_lock_44);
+    std::vector<struct rpc_task *> tasks;
+
+    if (commit_waiters) {
+        // flush_waiters is dynamically allocated when first task is added.
+        assert(!commit_waiters->empty());
+        tasks.swap(*commit_waiters);
+        assert(commit_waiters->empty());
+
+        /*
+         * Free the commit_waiters vector.
+         */
+        delete commit_waiters;
+        commit_waiters = nullptr;
+    }
+
+    return tasks;
+}
+
 std::vector<struct rpc_task *> membuf::get_flush_waiters()
 {
     /*
@@ -2362,6 +2392,43 @@ std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_nonflushing_bcs_range(
     return bc_vec;
 }
 
+std::vector<bytes_chunk> bytes_chunk_cache::get_contiguous_dirty_bcs(
+        uint64_t& size) const
+{
+    std::vector<bytes_chunk> bc_vec;
+    size = 0;
+
+    // TODO: Make it shared lock.
+    const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
+    auto it = chunkmap.lower_bound(0);
+    uint64_t prev_offset = AZNFSC_BAD_OFFSET;
+
+    while (it != chunkmap.cend()) {
+        const struct bytes_chunk& bc = it->second;
+        struct membuf *mb = bc.get_membuf();
+
+        if (mb->is_dirty() && !mb->is_flushing()) {
+            if (prev_offset != AZNFSC_BAD_OFFSET) {
+                if (prev_offset != bc.offset) {
+                    break;
+                } else {
+                    size += bc.length;
+                    prev_offset = bc.offset + bc.length;
+                }
+            } else {
+                size += bc.length;
+                prev_offset = bc.offset + bc.length;
+            }
+            mb->set_inuse();
+            bc_vec.emplace_back(bc);
+        }
+
+        ++it;
+    }
+
+    return bc_vec;
+}
+
 bool bytes_chunk_cache::add_flush_waiter(uint64_t offset,
                                          uint64_t length,
                                          struct rpc_task *task)
@@ -2408,6 +2475,54 @@ bool bytes_chunk_cache::add_flush_waiter(uint64_t offset,
 
     return false;
 }
+
+bool bytes_chunk_cache::add_commit_waiter(uint64_t offset,
+                                          uint64_t length,
+                                          struct rpc_task *task)
+{
+    assert(offset < AZNFSC_MAX_FILE_SIZE);
+    assert(length > 0);
+
+    // Only frontend write tasks must ever wait.
+    assert(task->magic == RPC_TASK_MAGIC);
+    assert(task->get_op_type() == FUSE_WRITE);
+    assert(task->rpc_api->write_task.is_fe());
+
+    const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
+    auto it = chunkmap.lower_bound(offset);
+    struct bytes_chunk *last_bc = nullptr;
+
+    // Get the last bc for the given range.
+    while (it != chunkmap.cend() && (it->first < (offset + length))) {
+        last_bc = &(it->second);
+        ++it;
+    }
+
+    if (last_bc != nullptr) {
+        // membuf must have at least one byte in the requested range.
+        assert(last_bc->offset >= offset &&
+               last_bc->offset < (offset + length));
+
+        struct membuf *mb = last_bc->get_membuf();
+
+        std::unique_lock<std::mutex> _lock2(mb->commit_waiters_lock_44);
+        /*
+         * Only add flush waiters to dirty membufs, else it may have already
+         * completed flush and we don't want the task to be waiting forever.
+         */
+        if (mb->is_flushing() || mb->is_commit_pending()) {
+            if (mb->commit_waiters == nullptr) {
+                mb->commit_waiters = new std::vector<struct rpc_task *>();
+            }
+
+            mb->commit_waiters->emplace_back(task);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 
 std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_bc_range(
         uint64_t start_off, uint64_t end_off) const

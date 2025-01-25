@@ -2387,6 +2387,7 @@ public:
      */
     bool add_bc(const bytes_chunk& bc);
     void issue_write_rpc();
+    void issue_commit_rpc();
 
 #ifdef ENABLE_NO_FUSE
     /*

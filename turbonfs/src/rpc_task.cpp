@@ -806,6 +806,194 @@ void access_callback(
     }
 }
 
+static void complete_commit_waiter_tasks(struct membuf *mb)
+{
+    std::vector<struct rpc_task *> tvec = mb->get_commit_waiters();
+    for (auto& task : tvec) {
+        assert(task->magic == RPC_TASK_MAGIC);
+        assert(task->get_op_type() == FUSE_WRITE);
+        assert(task->rpc_api->write_task.is_fe());
+        assert(task->rpc_api->write_task.get_size() > 0);
+
+        AZLogDebug("Completing flush waiter task {} for [{}, {})",
+                    fmt::ptr(task),
+                    task->rpc_api->write_task.get_offset(),
+                    task->rpc_api->write_task.get_offset() +
+                    task->rpc_api->write_task.get_size());
+        task->reply_write(task->rpc_api->write_task.get_size());
+    }
+}
+
+static void commit_callback(
+    struct rpc_context *rpc,
+    int rpc_status,
+    void *data,
+    void *private_data)
+{
+    rpc_task *task = (rpc_task*) private_data;
+    assert(task->magic == RPC_TASK_MAGIC);
+    assert(task->get_op_type() == FUSE_FLUSH);
+    assert(task->rpc_api->pvt != nullptr);
+
+    auto res = (COMMIT3res*)data;
+
+    INJECT_JUKEBOX(res, task);
+
+    const fuse_ino_t ino =
+        task->rpc_api->flush_task.get_ino();
+    struct nfs_inode *inode =
+        task->get_client()->get_nfs_inode_from_ino(ino);
+    auto bc_vec_ptr = (std::vector<bytes_chunk> *)task->rpc_api->pvt;
+
+    const int status = task->status(rpc_status, NFS_STATUS(res));
+    UPDATE_INODE_WCC(inode, res->COMMIT3res_u.resok.file_wcc);
+    AZLogInfo("commit_callback");
+    /*
+     * Now that the request has completed, we can query libnfs for the
+     * dispatch time.
+     */
+    task->get_stats().on_rpc_complete(rpc_get_pdu(rpc), NFS_STATUS(res));
+    if (status == 0) {
+        uint64_t offset = 0;
+        uint64_t length = 0;
+        auto &bc_vec = *bc_vec_ptr; // get the vector from the pointer.
+
+        for (auto &bc : bc_vec)
+        {
+            struct membuf *mb = bc.get_membuf();
+            assert(mb->is_inuse());
+            assert(mb->is_locked());
+            assert(mb->is_commit_pending());
+            assert(mb->is_uptodate());
+
+            mb->clear_commit_pending();
+            complete_commit_waiter_tasks(mb);
+            mb->clear_locked();
+            mb->clear_inuse();
+
+            /**
+             * Collect the contiguous range of bc's to release.
+             */
+            if (offset == 0 && length == 0) {
+                offset = bc.offset;
+                length = bc.length;
+            } else if (offset + length == bc.offset) {
+                length += bc.length;
+            } else {
+                auto release = inode->get_filecache()->release(offset, length);
+                AZLogDebug("BC released {}, asked for {}", release, length);
+                offset = bc.offset;
+                length = bc.length;
+            }
+        }
+
+        if (length != 0) {
+            assert(length != 0);
+            auto release = inode->get_filecache()->release(offset, length);
+
+            AZLogDebug("BC offset {}, asked for {}, release {}", (offset/1048576), (length/1048576), release);
+        }
+
+        task->free_rpc_task();
+        #if 0
+        if (task->get_fuse_req() != nullptr) {
+            task->reply_error(status);
+        } else {
+            task->free_rpc_task();
+        }
+        #endif
+    } else if (NFS_STATUS(res) == NFS3ERR_JUKEBOX) {
+        task->get_client()->jukebox_retry(task);
+        return;
+    } else {
+        auto &bc_vec = *bc_vec_ptr; // get the vector from the pointer.
+        /*
+         * Mark the membufs as dirty and clear the commit_pending flag.
+         * Next write will initiate the flush again with stable write.
+         */
+        for (auto &bc : bc_vec)
+        {
+            struct membuf *mb = bc.get_membuf();
+            assert(mb->is_inuse());
+            assert(mb->is_locked());
+            assert(mb->is_commit_pending());
+            assert(mb->is_uptodate());
+
+            mb->clear_commit_pending();
+            complete_commit_waiter_tasks(mb);
+            mb->set_dirty();
+            mb->clear_locked();
+            mb->clear_inuse();
+        }
+        inode->set_stable_write();
+
+        task->free_rpc_task();
+        #if 0
+        if (task->get_fuse_req() != nullptr) {
+            task->reply_error(status);
+        } else {
+            inode->set_write_error(status);
+            task->free_rpc_task();
+        }
+        #endif
+    }
+
+    delete bc_vec_ptr;
+
+    inode->clear_commit_in_progress();
+}
+
+void rpc_task::issue_commit_rpc()
+{
+    // Must only be called for a flush task.
+    assert(get_op_type() == FUSE_FLUSH);
+
+    const fuse_ino_t ino = rpc_api->flush_task.get_ino();
+    struct nfs_inode *inode = get_client()->get_nfs_inode_from_ino(ino);
+    assert(inode->is_stable_write() == false);
+    assert(inode->get_filecache()->is_flushing_in_progress() == false);
+
+    COMMIT3args args;
+    ::memset(&args, 0, sizeof(args));
+    bool rpc_retry = false;
+
+    AZLogInfo("issue_commit_rpc");
+
+    /*
+     * Get the bcs marked for commit_pending.
+     */
+    if (rpc_api->pvt == nullptr) {
+        rpc_api->pvt = static_cast<void *>(new std::vector<bytes_chunk>(inode->get_filecache()->get_commit_pending_bcs()));
+    }
+
+    args.file = inode->get_fh();
+    args.offset = 0;
+    args.count = 0;
+
+    do {
+        rpc_retry = false;
+        stats.on_rpc_issue();
+
+        if (rpc_nfs3_commit_task(get_rpc_ctx(),
+                                        commit_callback, &args,
+                                        this) == NULL) {
+            stats.on_rpc_cancel();
+            /*
+             * Most common reason for this is memory allocation failure,
+             * hence wait for some time before retrying. Also block the
+             * current thread as we really want to slow down things.
+             *
+             * TODO: For soft mount should we fail this?
+             */
+            rpc_retry = true;
+
+            AZLogWarn("rpc_nfs3_write_task failed to issue, retrying "
+                        "after 5 secs!");
+            ::sleep(5);
+        }
+    } while (rpc_retry);
+}
+
 /**
  * Must be called when bytes_completed bytes are successfully read/written.
  */
@@ -967,10 +1155,33 @@ void bc_iovec::on_io_fail(int status)
 
         /*
          * This membuf has completed flushing albeit with failure, check if any
-         * task is waiting for this membuf to be flushed.
+         * task is waiting for this membuf to be flushed/commit.
          */
         std::vector<struct rpc_task *> tvec = mb->get_flush_waiters();
         for (auto& task : tvec) {
+            assert(task->magic == RPC_TASK_MAGIC);
+            assert(task->get_op_type() == FUSE_WRITE);
+            assert(task->rpc_api->write_task.is_fe());
+
+            AZLogError("Completing flush waiter task {} for [{}, {}), "
+                       "failed: {}",
+                       fmt::ptr(task),
+                       task->rpc_api->write_task.get_offset(),
+                       task->rpc_api->write_task.get_offset() +
+                       task->rpc_api->write_task.get_size(),
+                       status);
+
+            task->reply_error(status);
+        }
+
+        /*
+         * This membuf has completed flushing albeit with failure, check if any
+         * task is waiting for this membuf to be committed. Now this membuf
+         * failed to flush, so we don't issue commit for this membuf. Hence
+         * we must complete the waiter tasks.
+         */
+        std::vector<struct rpc_task *> tvec_commit = mb->get_commit_waiters();
+        for (auto& task : tvec_commit) {
             assert(task->magic == RPC_TASK_MAGIC);
             assert(task->get_op_type() == FUSE_WRITE);
             assert(task->rpc_api->write_task.is_fe());
@@ -2308,6 +2519,141 @@ void rpc_task::run_access()
     } while (rpc_retry);
 }
 
+static void perform_inline_writes(struct rpc_task *task,
+                                  struct nfs_inode *inode)
+{
+    const size_t length = task->rpc_api->write_task.get_size();
+    const off_t offset = task->rpc_api->write_task.get_offset();
+    const fuse_ino_t ino = task->rpc_api->write_task.get_ino();
+    std::vector<bytes_chunk> bc_vec;
+
+    /*
+     * Grab flush_lock to get exclusive list of dirty chunks, which are not
+     * already being flushed. This also protects us racing with a truncate
+     * call and growing the file size after truncate shrinks the file.
+     */
+    inode->flush_lock();
+
+    /*
+     * prune_bytes is the number of bytes that need to be flushed to
+     * make space for the new writes. If it's 0, then we don't need to
+     * flush more data we can just wait for the ongoing flush/commit
+     * to complete.
+     */
+    uint64_t prune_bytes = inode->get_filecache()->get_bytes_to_prune();
+
+    if (prune_bytes == 0 && !inode->is_stable_write()) {
+        AZLogDebug("No bytes to prune, Wait for ongoing flush/commit"
+                    "to complete.");
+        /*
+         * In case of inline_write, we want to block the writes till the
+         * enough space is made for new writes. Every write thread will
+         * come here and try to take the lock, only one thread succeeds
+        * and wait for the ongoing flush/commit to complete. Rest of the
+        * threads will wait for the lock to be released by the first
+        * thread. After first thread completes the wait, check if any ongoing
+        * flush/commit is in progress and if it's still true. Mostly it will
+        * be false as new writes are blocked.
+        *
+        * Note: flush_lock() is held so that no new flush or commit task
+        *       is started.
+        */
+        inode->wait_for_ongoing_flush_commit(0, UINT64_MAX, task);
+    } else {
+        uint64_t size = 0;
+        if (inode->is_stable_write()) {
+            /*
+             * If the write is stable, we can directly write to the
+             * membufs and issue the writes to the backend.
+             */
+            bc_vec = inode->get_filecache()->get_dirty_nonflushing_bcs_range();
+            if (bc_vec.empty()) {
+               /*
+                * Another application write raced with us and it got to do the
+                * inline write before us. Try adding this task to the flush_waiters
+                * list for the membuf where we copied the application data. If
+                * we are able to add successfully, then we will call the fuse
+                * callback when the flush completes at the backend. This will
+                * slow down the writer application, thus relieving the memory
+                * pressure.
+                * If add_flush_waiter() returns false, that means this membuf
+                * is already flushed by that other thread and we can complete
+                * the fuse callback in this context.
+                */
+                inode->flush_unlock();
+
+                if (inode->get_filecache()->add_flush_waiter(offset,
+                                                             length,
+                                                             task)) {
+                    AZLogDebug("[{}] Inline write, membuf not flushed, write "
+                                "[{}, {}) will be completed when membuf is flushed",
+                                ino, offset, offset+length);
+                    return;
+                } else {
+                    AZLogDebug("[{}] Inline write, membuf already flushed, "
+                                "completing fuse write [{}, {})",
+                                ino, offset, offset+length);
+                    task->reply_write(length);
+                    return;
+                }
+            }
+        } else {
+            /*
+             * If the write is not stable, we need to copy the application
+             * data into the membufs and issue the writes to the backend.
+             */
+            bc_vec = inode->get_filecache()->get_contiguous_dirty_bcs(size);
+            if (!bc_vec.empty()) {
+                /*
+                 * Perform inline sync.
+                 * In case of unstable writes, we need to complete the write
+                 * on commit complete. So, we don't pass the 3rd arg to
+                 * sync_membufs(), but add the task to the commit_waiters list.
+                 */
+                inode->sync_membufs(bc_vec, false /* is_flush */, task);
+            }
+            inode->flush_unlock();
+
+            /*
+             * Set the commit_in_progress flag to ensure that the commit
+             * task is started after the flush completes.
+             */
+            inode->mark_commit_in_progress();
+
+            if (inode->get_filecache()->add_commit_waiter(
+                                                inode->last_flushing_offset,
+                                                inode->last_flushing_length,
+                                                task)) {
+                AZLogDebug("[{}] Inline write, membuf not flushed, write "
+                            "[{}, {}) will be completed when membuf is flushed",
+                            ino, inode->last_flushing_offset,
+                            inode->last_flushing_length);
+                return;
+            } else {
+                AZLogDebug("[{}] Inline write, membuf already flushed, "
+                            "completing fuse write [{}, {})",
+                            ino, inode->last_flushing_offset,
+                            inode->last_flushing_length);
+                task->reply_write(length);
+                return;
+            }
+        }
+    }
+
+    /*
+     * Perform inline sync.
+     * Since we pass the 3rd arg to sync_membufs, it tells sync_membufs()
+     * to call the fuse callback after all the issued backend writes
+     * complete. This will be done asynchronously while the sync_membufs()
+     * call will return after issuing the writes.
+     */
+    inode->sync_membufs(bc_vec, false /* is_flush */, task);
+    inode->flush_unlock();
+
+    // Free up the fuse thread without completing the application write.
+    return;
+}
+
 void rpc_task::run_write()
 {
     // This must be called only for front end tasks.
@@ -2464,69 +2810,25 @@ void rpc_task::run_write()
                    ino, sparse_write, (extent_right - extent_left),
                    extent_left, extent_right);
 
-        /*
-         * Grab flush_lock to get exclusive list of dirty chunks, which are not
-         * already being flushed. This also protects us racing with a truncate
-         * call and growing the file size after truncate shrinks the file.
-         */
-        inode->flush_lock();
-
-        std::vector<bytes_chunk> bc_vec =
-            inode->get_filecache()->get_dirty_nonflushing_bcs_range();
-
-        if (bc_vec.empty()) {
-            /*
-             * Another application write raced with us and it got to do the
-             * inline write before us. Try adding this task to the flush_waiters
-             * list for the membuf where we copied the application data. If
-             * we are able to add successfully, then we will call the fuse
-             * callback when the flush completes at the backend. This will
-             * slow down the writer application, thus relieving the memory
-             * pressure.
-             * If add_flush_waiter() returns false, that means this membuf
-             * is already flushed by that other thread and we can complete
-             * the fuse callback in this context.
-             */
-            inode->flush_unlock();
-
-            if (inode->get_filecache()->add_flush_waiter(offset,
-                                                         length,
-                                                         this)) {
-                AZLogDebug("[{}] Inline write, membuf not flushed, write "
-                           "[{}, {}) will be completed when membuf is flushed",
-                           ino, offset, offset+length);
-                return;
-            } else {
-                AZLogDebug("[{}] Inline write, membuf already flushed, "
-                           "completing fuse write [{}, {})",
-                           ino, offset, offset+length);
-                reply_write(length);
-                return;
-            }
-        }
-
-        /*
-         * Perform inline sync.
-         * Since we pass the 3rd arg to sync_membufs, it tells sync_membufs()
-         * to call the fuse callback after all the issued backend writes
-         * complete. This will be done asynchronously while the sync_membufs()
-         * call will return after issuing the writes.
-         *
-         * Note: sync_membufs() can free this rpc_task if all issued backend
-         *       writes complete before sync_membufs() can return.
-         *       DO NOT access rpc_task after sync_membufs() call.
-         */
-        inode->sync_membufs(bc_vec, false /* is_flush */, this);
-        inode->flush_unlock();
-
         // Free up the fuse thread without completing the application write.
-        return;
+        return perform_inline_writes(this, inode);
     }
 
     /*
-     * Ok, we don't need to do inline writes. See if we have enough dirty
-     * data and we need to start async flush.
+     * We don't need to do inline writes. See if we have enough bytes to
+     * commit to the backend.
      */
+    const bool needs_commit = inode->get_filecache()->commit_required();
+    if (needs_commit) {
+        /*
+         * Set the commit_in_progress flag to ensure that the commit
+         * task is startet.
+         */
+        inode->mark_commit_in_progress();
+
+        assert(inode->is_commit_in_progress());
+        assert(!need_inline_write);
+    }
 
     /*
      * If the extent size exceeds the max allowed dirty size as returned by
@@ -2556,6 +2858,54 @@ void rpc_task::run_write()
                (extent_right - extent_left),
                bytes_to_flush,
                max_dirty_extent);
+
+    if (inode->is_commit_in_progress()) {
+        /*
+         * Commit is in progress, we can't start new flush to the BLOB.
+         * Complete the write if it doesn't need flush, otherwise add to
+         * commit_waiters list.
+         * Note: It make sense to complete the write only after commit is done
+         *       if we already reached the flush limit. As otherwise it will
+         *       trigger inline writes.
+         */
+        if (bytes_to_flush < max_dirty_extent) {
+            AZLogDebug("[{}] Commit in progress, skipping write, inline_write is false",
+                       ino);
+            reply_write(length);
+            return;
+        } else {
+            /*
+             * Add this task to the commit_waiters list, so that it can be
+             * completed after the commit is done.
+             */
+            if(inode->get_filecache()->add_commit_waiter(
+                                            inode->last_flushing_offset,
+                                            inode->last_flushing_length,
+                                            this)) {
+                AZLogDebug("[{}] Commit in progress, added to commit_waiters list",
+                           ino);
+                return;
+            } else {
+                /*
+                 * Commit is done, but this task is not added to commit_waiters
+                 * list, so complete the write.
+                 */
+                AZLogDebug("[{}] Commit in progress, but not added to commit_waiters list, "
+                           "completing write", ino);
+                reply_write(length);
+            return;
+            }
+        }
+
+        // We should never reach here.
+        assert(false);
+        return;
+    }
+
+    /*
+     * Ok, we neither need inline writes nor commit in progress. See if we have
+     * enough dirty data and we need to start async flush.
+     */
 
     if ((extent_right - extent_left) < max_dirty_extent) {
         /*
@@ -2588,9 +2938,19 @@ void rpc_task::run_write()
      */
     inode->flush_lock();
 
-    std::vector<bytes_chunk> bc_vec =
-        inode->get_filecache()->get_dirty_nonflushing_bcs_range(extent_left,
-                                                                extent_right);
+    uint64_t size = 0;
+    std::vector<bytes_chunk> bc_vec;
+    /*
+     * If the inode is stable write, then get the dirty membufs in the range.
+     * otherwise get the dirty membufs contigious range.
+     */
+    if (inode->is_stable_write()) {
+        bc_vec =
+         inode->get_filecache()->get_dirty_nonflushing_bcs_range(extent_left,
+                                                                 extent_right);
+    } else {
+        bc_vec = inode->get_filecache()->get_contiguous_dirty_bcs(size);
+    }
 
     if (bc_vec.size() == 0) {
         inode->flush_unlock();

@@ -237,6 +237,9 @@ struct membuf
     std::vector<struct rpc_task *> *flush_waiters = nullptr;
     std::mutex flush_waiters_lock_44;
 
+    std::vector<struct rpc_task *> *commit_waiters = nullptr;
+    std::mutex commit_waiters_lock_44;
+
     /**
      * get_flush_waiters() returns the list of tasks waiting for this
      * membuf to be flushed to the Blob. All these tasks must be completed
@@ -246,6 +249,16 @@ struct membuf
      *       it's not idempotent.
      */
     std::vector<struct rpc_task *> get_flush_waiters();
+
+    /**
+     * get_commit_waiters() returns the list of tasks waiting for this
+     * membuf to be committed to the Blob. All these tasks must be completed
+     * appropriately when membuf commit completes (success or failure).
+     *
+     * Note: This splices the commit_waiters list and returns, and hence
+     *       it's not idempotent.
+     */
+    std::vector<struct rpc_task *> get_commit_waiters();
 
     /*
      * If is_file_backed() is true then 'allocated_buffer' is the mmap()ed
@@ -1222,6 +1235,11 @@ public:
                           uint64_t length,
                           struct rpc_task *task);
 
+    bool add_commit_waiter(uint64_t offset,
+                           uint64_t length,
+                           struct rpc_task *task);
+
+
     /*
      * Returns all dirty chunks for a given range in chunkmap.
      * Before returning it increases the inuse count of underlying membuf(s).
@@ -1258,6 +1276,16 @@ public:
      */
     std::vector<bytes_chunk> get_dirty_nonflushing_bcs_range(
             uint64_t st_off = 0, uint64_t end_off = UINT64_MAX) const;
+
+    /**
+     * Returns contiguous dirty (and not flushing) chunks from chunmap, starting
+     * with the lowest dirty offset, and returns the total number of (dirty)
+     * bytes contained in the returned chunks.
+     * Before returning it increases the inuse count of underlying membuf(s).
+     * Caller will typically flush these to the backing Blob as UNSTABLE
+     * writes.
+     */
+    std::vector<bytes_chunk> get_contiguous_dirty_bcs(uint64_t& size) const;
 
     /*
      * Returns all dirty chunks which are currently flushing for a given range
@@ -1384,6 +1412,36 @@ public:
         return std::min(max_dirty_extent, uint64_t(1024 * 1024 * 1024ULL));
     }
 
+    /*
+     * Maximum size of commit bytes that can be pending in cache, before we
+     * should commit it to Blob.
+     * It should be greater than max_dirty_extent_bytes() and smaller than
+     * inline_dirty_threshold. So, that inline pruning can be avoided.
+     * This is 60% of the allowed cache size.
+     * f.e = Cache size of 4GB then max_commit_bytes = 2.4GB
+     * - Flush will start every 1GB dirty data and each 1GB dirty data
+     *   converted to commit_pending_bytes.
+     *
+     * This is 60% of the allowed cache size.
+     */
+    uint64_t max_commit_bytes() const
+    {
+        // Maximum cache size allowed in bytes.
+        static const uint64_t max_total =
+            (aznfsc_cfg.cache.data.user.max_size_mb * 1024 * 1024ULL);
+        assert(max_total != 0);
+
+        static const uint64_t max_commit_bytes =
+            std::max((((uint64_t)(max_total * 0.6))/ max_dirty_extent_bytes()) * max_dirty_extent_bytes(),
+                     (uint64_t) (2 * AZNFSCFG_WSIZE_MAX));
+
+        static const uint64_t min_commit_bytes =
+         std::max(((2 * max_dirty_extent_bytes()) - AZNFSCFG_WSIZE_MAX),
+          (uint64_t) (2 * AZNFSCFG_WSIZE_MAX));
+
+        return std::max((max_commit_bytes - AZNFSCFG_WSIZE_MAX), min_commit_bytes);
+    }
+
     /**
      * Get the amount of dirty data that needs to be flushed.
      * This excludes the data which is already flushing.
@@ -1430,6 +1488,52 @@ public:
     bool is_flushing_in_progress() const
     {
         return bytes_flushing > 0;
+    }
+
+    /*
+     * Check if bytes_commit_pending is equal or more than
+     * max_commit_bytes limit.
+     */
+    bool commit_required() const
+    {
+        return (bytes_commit_pending >= max_commit_bytes());
+    }
+
+    /*
+     * get_bytes_to_prune() returns the number of bytes that need to be flushed
+     * inline to free up the space. If there are enough bytes_flushing then we
+     * can just wait for them to complete.
+     *
+     * Note : We are not considering bytes_commit_pending in this calculation.
+     *        If bytes_commit_pending are high then commit already started and
+     *        if bytes_flushing are high once flushing is done commit will be
+     *        triggered.
+     */
+    uint64_t get_bytes_to_prune() const
+    {
+        static const uint64_t max_dirty_allowed_per_cache =
+            max_dirty_extent_bytes() * 2;
+        int64_t total_bytes =
+            std::max(int64_t(bytes_dirty - bytes_flushing), int64_t(0));
+        const bool local_pressure = total_bytes > (int64_t)max_dirty_allowed_per_cache;
+
+        if (local_pressure) {
+            return std::max(int64_t(0), (int64_t)(total_bytes - max_dirty_extent_bytes()));
+        }
+
+        /*
+         * Global pressure is when get_prune_goals() returns non-zero bytes
+         * to be pruned inline.
+         */
+        uint64_t inline_bytes;
+
+        /*
+         * TODO: Noisy neighbor syndrome, where one file is hogging the cache,
+         *       inline pruning will be triggered for other files.
+         */
+        get_prune_goals(&inline_bytes, nullptr);
+        return std::max(int64_t(inline_bytes - (bytes_flushing + bytes_commit_pending)),
+                    (int64_t)0);
     }
 
     /**

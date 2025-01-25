@@ -279,6 +279,29 @@ private:
      */
     struct stat attr;
 
+    /**
+     * We maintain following multiple views of the file and thus multiple file
+     * sizes for those views.
+     * - Cached.
+     *   This is the view of the file that comprises of data that has been
+     *   written by the application and saved in file cache. It may or may not
+     *   have been flushed and/or committed. This is the most uptodate view of
+     *   the file and applications must use this view.
+     *   cached_filesize tracks the file size for this view.
+     * - Uncommited.
+     *   This is the view of the file that tracks data that has been flushed
+     *   using UNSTABLE writes but not yet COMMITted to the Blob. This view of
+     *   the file is only used to see if the next PB call will write after the
+     *   last PB'ed byte and thus can be appended.
+     *   putblock_filesize tracks the file size for this view.
+     * - Committed.
+     *   This is the view of the file that tracks data committed to the Blob.
+     *   Other clients will see this view.
+     *   attr.st_size tracks the file size for this view.
+     */
+    off_t cached_filesize = 0;
+    off_t putblock_filesize = 0;
+
     /*
      * Has this inode seen any non-append write?
      * This starts as false and remains false as long as copy_to_cache() only
@@ -385,6 +408,13 @@ public:
     int write_error = 0;
 
     /*
+     * Last offset and length of the last flushing operation.
+     * This is used add task waiting for flush/commit to complete.
+     */
+    uint64_t last_flushing_offset = 0;
+    uint64_t last_flushing_length = 0;
+
+    /*
      * Commit state for this inode.
      * This is used to track the state of commit operation for this inode, which
      * can be one of:
@@ -417,6 +447,12 @@ public:
     };
 
     std::atomic<commit_state_t> commit_state = commit_state_t::COMMIT_NOT_NEEDED;
+
+    /*
+     * commit_lock_5 is used to synchronize flush thread and write thread
+     * for commit operation.
+     */
+    std::mutex commit_lock_5;
 
     /**
      * TODO: Initialize attr with postop attributes received in the RPC
@@ -1319,17 +1355,50 @@ public:
      *       progress (which must have held the is_flushing lock).
      */
     int flush_cache_and_wait(uint64_t start_off = 0,
-                             uint64_t end_off = UINT64_MAX);
+                             uint64_t end_off = UINT64_MAX,
+                             struct rpc_task *parent_task = nullptr);
+
+    void mark_commit_in_progress();
 
     /**
      * Wait for currently flushing membufs to complete.
+     * If parent_task is non-null, then it's added to the commit_waiters list
+     * and returned. Otherwise it waits for the ongoing flush to complete.
+     *
      * Returns 0 on success and a positive errno value on error.
      *
      * Note : Caller must hold the inode is_flushing lock to ensure that
      *        no new membufs are added till this call completes.
      */
-    int wait_for_ongoing_flush(uint64_t start_off = 0,
-                               uint64_t end_off = UINT64_MAX);
+    int wait_for_ongoing_flush_commit(uint64_t start_off = 0,
+                               uint64_t end_off = UINT64_MAX,
+                               struct rpc_task *parent_task = nullptr);
+
+    /*
+     * commit_membufs() is called to commit uncommitted membufs to the BLOB.
+     * It creates commit RPC and sends it to the NFS server.
+     */
+    void commit_membufs();
+
+    /*
+     * switch_to_stable_write() is called to switch the inode to stable write
+     * mode. There is should be no ongoing commit/flusing operation when this
+     * is called. It creates a commit RPC to commit all the uncopmmitted membufs
+     * to the BLOB.
+     */
+    void switch_to_stable_write();
+
+    /**
+     * Check if stable write is required for the given offset.
+     * Given offset is the start of contigious dirty membufs that need to be
+     * flushed to the BLOB.
+     */
+    bool check_stable_write_required(off_t offset);
+
+    /**
+     * Wait for ongoing commit operation to complete.
+     */
+    void wait_for_ongoing_commit();
 
     /**
      * Sync the dirty membufs in the file cache to the NFS server.
