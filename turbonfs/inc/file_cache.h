@@ -1239,6 +1239,8 @@ public:
                            uint64_t length,
                            struct rpc_task *task);
 
+    void cleanup_on_error();
+
 
     /*
      * Returns all dirty chunks for a given range in chunkmap.
@@ -1400,6 +1402,9 @@ public:
      * holding more data than the Blob NFS server's scheduler cache size.
      * We want to send as prompt as possible to utilize the n/w b/w but slow
      * enough to give the write scheduler an opportunity to merge better.
+     *
+     * Note: max_dirty_extent is static as it doesn't change after it's
+     *       queried for the first time.
      */
     uint64_t max_dirty_extent_bytes() const
     {
@@ -1407,9 +1412,12 @@ public:
         static const uint64_t max_total =
             (aznfsc_cfg.cache.data.user.max_size_mb * 1024 * 1024ULL);
         assert(max_total != 0);
-        static const uint64_t max_dirty_extent = (max_total * 0.6);
+        static const uint64_t max_dirty_extent = std::min(
+            (uint64_t)(max_total * 0.6), (uint64_t)(1024 * 1024 * 1024ULL));
 
-        return std::min(max_dirty_extent, uint64_t(1024 * 1024 * 1024ULL));
+        assert(max_dirty_extent != 0);
+
+        return max_dirty_extent;
     }
 
     /*
@@ -1497,6 +1505,15 @@ public:
     bool commit_required() const
     {
         return (bytes_commit_pending >= max_commit_bytes());
+    }
+
+    /*
+     * Check if bytes_to_flush is equal or more than
+     * max_dirty_extent_bytes limit.
+     */
+    bool flush_required() const
+    {
+        return (get_bytes_to_flush() >= max_dirty_extent_bytes());
     }
 
     /*

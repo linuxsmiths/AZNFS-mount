@@ -323,7 +323,7 @@ private:
      * Note: As of now, we are not using this flag as commit changes not yet
      *       integrated, so we are setting this flag to true.
      */
-    bool stable_write = true;
+    bool stable_write = false;
 
 public:
     /*
@@ -1169,7 +1169,8 @@ public:
     bool is_commit_in_progress() const
     {
         assert(commit_state != commit_state_t::INVALID);
-        return (commit_state == commit_state_t::COMMIT_IN_PROGRESS);
+        return ((commit_state == commit_state_t::COMMIT_IN_PROGRESS) ||
+               (commit_state == commit_state_t::NEEDS_COMMIT));
     }
 
     /**
@@ -1355,10 +1356,11 @@ public:
      *       progress (which must have held the is_flushing lock).
      */
     int flush_cache_and_wait(uint64_t start_off = 0,
-                             uint64_t end_off = UINT64_MAX,
-                             struct rpc_task *parent_task = nullptr);
+                             uint64_t end_off = UINT64_MAX);
 
     void mark_commit_in_progress();
+    void add_task_to_commit_waiters(struct rpc_task *task);
+    void add_task_to_flush_waiters(struct rpc_task *task);
 
     /**
      * Wait for currently flushing membufs to complete.

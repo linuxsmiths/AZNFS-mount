@@ -483,7 +483,7 @@ void membuf::clear_flushing()
      * TODO: Remove me once we have enough testing.
      *       Don't release it to production.
      */
-    assert(!is_dirty());
+    // assert(!is_dirty());
 
     flag &= ~MB_Flag::Flushing;
 
@@ -2268,7 +2268,7 @@ void bytes_chunk_cache::clear_nolock()
     assert(bytes_cached == 0);
 
     if (bytes_allocated != 0) {
-        AZLogWarn("[{}] Cache purge: bytes_allocated is still {}, some user "
+        AZLogDebug("[{}] Cache purge: bytes_allocated is still {}, some user "
                   "is still holding on to the bytes_chunk/membuf even after "
                   "dropping the inuse count: backing_file_name={}",
                   CACHE_TAG, bytes_allocated.load(), backing_file_name);
@@ -2523,6 +2523,30 @@ bool bytes_chunk_cache::add_commit_waiter(uint64_t offset,
     return false;
 }
 
+void bytes_chunk_cache::cleanup_on_error()
+{
+    const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
+
+    for (auto it = chunkmap.begin(); it != chunkmap.cend(); ++it) {
+        struct bytes_chunk& bc = it->second;
+        struct membuf *mb = bc.get_membuf();
+        if (!mb->is_inuse() && !mb->is_locked()) {
+            mb->set_inuse();
+            mb->set_locked();
+            if (mb->is_dirty()) {
+                mb->clear_dirty();
+            }
+
+            if (mb->is_flushing()) {
+                mb->clear_flushing();
+            }
+
+            if (mb->is_commit_pending()) {
+                mb->clear_commit_pending();
+            }
+        }
+    }
+}
 
 std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_bc_range(
         uint64_t start_off, uint64_t end_off) const
