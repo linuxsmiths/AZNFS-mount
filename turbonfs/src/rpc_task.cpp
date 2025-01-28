@@ -2575,7 +2575,7 @@ static void perform_inline_writes(struct rpc_task *task,
      * flush more data we can just wait for the ongoing flush/commit
      * to complete.
      */
-    uint64_t prune_bytes = inode->get_filecache()->get_bytes_to_prune();
+    uint64_t prune_bytes = inode->get_filecache()->get_inline_flush_bytes();
 
     if (prune_bytes == 0 && !inode->is_stable_write()) {
         AZLogInfo("No bytes to prune, Wait for ongoing flush/commit"
