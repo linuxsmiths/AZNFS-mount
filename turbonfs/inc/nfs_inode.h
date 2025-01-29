@@ -127,8 +127,16 @@ struct nfs_inode
      *
      * See flush_lock()/flush_unlock() for the actual locking.
      *
+     * Note: While flush_lock is held it's guaranteed that no new flush can
+     *       start, but there can be ongoing flushes at the time when flush_lock
+     *       is called (and it returns with the lock held). If the caller wants
+     *       to proceed only after all ongoing flushes complete (and no new
+     *       flushes are started), it must hold the flush_lock and then wait
+     *       for ongoing flushes to complete. Ref flush_cache_and_wait().
+     *
      * Note: Though it's called flush lock, but it protects backend file size
-     *       changes through both flush and/or commit.
+     *       changes through both flush and/or commit, i.e., if flush_lock is
+     *       held it's guaranteed that no new flush or commit can start.
      */
     mutable std::atomic<bool> is_flushing = false;
     mutable std::condition_variable_any flush_cv;
@@ -319,9 +327,6 @@ private:
      * writes (either overwrite or sparse write) must go as a stable write
      * (since server knows best how to allocate blocks for them).
      * Once set to true, it remains true for the life of the inode.
-     * 
-     * Note: As of now, we are not using this flag as commit changes not yet
-     *       integrated, so we are setting this flag to true.
      */
     bool stable_write = false;
 
@@ -408,8 +413,10 @@ public:
     int write_error = 0;
 
     /*
-     * Last offset and length of the last flushing operation.
-     * This is used add task waiting for flush/commit to complete.
+     * Offset and length of the latest flush operation.
+     * Tasks that want to wait for multiple membufs to be flushed/committed,
+     * will add themselves to flush_waiters/commit_waiters list for this
+     * membuf. See add_task_to_flush_waiters()/add_task_to_commit_waiters().
      */
     uint64_t last_flushing_offset = 0;
     uint64_t last_flushing_length = 0;
@@ -1138,42 +1145,86 @@ public:
      }
 
     /**
-     * Is commit pending for this inode?
+     * Is commit pending/scheduled for this inode?
+     *
+     * It's called from write_iov_callback() when flush/write completes to see
+     * if some other thread has scheduled commit (as it could not start commit
+     * since flush was in progress) and it needs to start commit now.
+     *
+     * This MUST be called with flush_lock held.
      */
     bool is_commit_pending() const
     {
+        assert(is_flushing);
         assert(commit_state != commit_state_t::INVALID);
         return (commit_state == commit_state_t::NEEDS_COMMIT);
     }
 
     /**
-     * set needs_commit state for this inode.
-     * Note this is set to let flushing task know that commit is pending and start commit task.
+     * Schedule commit for this inode.
+     *
+     * This MUST be called with flush_lock held, as only one thread must
+     * schedule commit. Note that a thread wanting to commit some data, checks
+     * if some other thread is already flushing data from that cache, if yes it
+     * cannot start the commit till the flush completes (as we need consistent
+     * TBL at the time of commit), so it just schedules the commit and
+     * write_iov_callback() then starts the commit when the last ongoing flush
+     * completes. If there's no ongoing flush at the time of this call, then the
+     * thread that wants to commit must start the commit itself, in that case
+     * it'll call set_commit_in_progress() and not set_commit_pending().
+     * See schedule_or_start_commit().
+     *
+     * XXX Do not confuse it with similar function in membuf.
+     *     That is used to set "commit needed" for a membuf after it's written
+     *     using UNSTABLE write. This one is for the inode and conveys that one
+     *     or more membufs in this inode's filecache need to be committed.
      */
     void set_commit_pending()
     {
-        // Commit can be set to pending only if it is in commit_not_needed state.
+        assert(is_flushing);
+        /*
+         * Commit MUST be scheduled only if it is not already running or
+         * scheduled.
+         */
         assert(commit_state == commit_state_t::COMMIT_NOT_NEEDED);
         commit_state = commit_state_t::NEEDS_COMMIT;
     }
 
     /**
      * Is commit in progress for this inode?
+     * Note that we consider commit to be in-progress even if it's scheduled
+     * (commit_state == NEEDS_COMMIT) but not yet running. This is because
+     * once scheduled the commit WILL DEFINITELY run (when the last flush
+     * completes) and we usually don't need to distinguish between that and
+     * whether it's actually running now.
+     *
+     * This can only be safely called with flush_lock held.
+     * Depending on other conditions, caller may be able to call it w/o the
+     * flush_lock but be careful and think through scenarios where some
+     * other thread can call set_commit_pending()/set_commit_in_progress(),
+     * right after or before our call to is_commit_in_progress().
      */
     bool is_commit_in_progress() const
     {
         assert(commit_state != commit_state_t::INVALID);
         return ((commit_state == commit_state_t::COMMIT_IN_PROGRESS) ||
-               (commit_state == commit_state_t::NEEDS_COMMIT));
+                (commit_state == commit_state_t::NEEDS_COMMIT));
     }
 
     /**
      * Set commit_in_progress state for this inode.
+     *
+     * This MUST be called with flush_lock held, as only one thread must
+     * start commit.
      */
     void set_commit_in_progress()
     {
+        assert(is_flushing);
+
         assert(commit_state != commit_state_t::INVALID);
+        // Must not already be in-progress or scheduled.
         assert(commit_state != commit_state_t::COMMIT_IN_PROGRESS);
+
         commit_state = commit_state_t::COMMIT_IN_PROGRESS;
     }
 
@@ -1352,42 +1403,67 @@ public:
     int flush_cache_and_wait(uint64_t start_off = 0,
                              uint64_t end_off = UINT64_MAX);
 
-    void mark_commit_in_progress();
-    void add_task_to_commit_waiters(struct rpc_task *task);
+    /**
+     * Start commit of (all) uncommitted data. Since commit and flush cannot
+     * run in parallel, if there's an ongoing flush it schedules commit by
+     * calling set_commit_pending() which will cause the last completing flush
+     * to trigger the commit, else it starts the commit.
+     * MUST be called only when doing unstable writes.
+     */
+    void schedule_or_start_commit();
+
+    /**
+     * Helper method for calling file_cache's add_flush_waiter() method.
+     * If not able to add successfully, then it completes the task else the
+     * task will be completed when ongoing flush completes.
+     * Call to this function guarantees that task will be completed and
+     * caller need not complete the task.
+     */
     void add_task_to_flush_waiters(struct rpc_task *task);
+
+    /**
+     * Helper method for calling file_cache's add_commit_waiter() method.
+     * If not able to add successfully, then it completes the task else the
+     * task will be completed when ongoing commit or commit initiated after
+     * the ongoing flush completes.
+     * Call to this function guarantees that task will be completed and
+     * caller need not complete the task.
+     */
+    void add_task_to_commit_waiters(struct rpc_task *task);
 
     /**
      * Wait for currently flushing membufs to complete.
      * If parent_task is non-null, then it's added to the commit_waiters list
-     * and returned. Otherwise it waits for the ongoing flush to complete.
+     * and returned, otherwise it waits for the ongoing flush (and subsequent
+     * commit) to complete.
      *
      * Returns 0 on success and a positive errno value on error.
      *
      * Note : Caller must hold the inode is_flushing lock to ensure that
-     *        no new membufs are added till this call completes.
+     *        no new flush is started till this call completes.
      */
-    int wait_for_ongoing_flush_commit(uint64_t start_off = 0,
-                               uint64_t end_off = UINT64_MAX,
-                               struct rpc_task *parent_task = nullptr);
+    int wait_for_ongoing_flush_commit(struct rpc_task *parent_task = nullptr);
 
-    /*
-     * commit_membufs() is called to commit uncommitted membufs to the BLOB.
+    /**
+     * commit_membufs() is called to commit uncommitted membufs to the Blob.
      * It creates commit RPC and sends it to the NFS server.
      */
     void commit_membufs();
 
-    /*
+    /**
      * switch_to_stable_write() is called to switch the inode to stable write
-     * mode. There is should be no ongoing commit/flusing operation when this
-     * is called. It creates a commit RPC to commit all the uncopmmitted membufs
-     * to the BLOB.
+     * mode. It waits for all ongoing flush and subsequent commit to complete.
+     * If not already scheduled, it'll perform an explicit commit after the
+     * flush complete.
+     * Post that it'll mark inode for stable write and return. From then on
+     * any writes to this inode will be sent as stable writes.
      */
     void switch_to_stable_write();
 
     /**
      * Check if stable write is required for the given offset.
-     * Given offset is the start of contigious dirty membufs that need to be
-     * flushed to the BLOB.
+     * Given offset is the start of contiguous dirty membufs that need to be
+     * flushed to the Blob.
      */
     bool check_stable_write_required(off_t offset);
 
@@ -1404,6 +1480,8 @@ public:
      * completed once all these flushes complete. This can be used by the
      * caller in case of memory pressure when we want to delay fuse callbacks
      * to slow down writes which can cause more memory to be dirtied.
+     *
+     * Note: Must be called with flush_lock held.
      *
      * Note: sync_membufs() can free parent_task if all issued backend
      *       writes complete before sync_membufs() could return.

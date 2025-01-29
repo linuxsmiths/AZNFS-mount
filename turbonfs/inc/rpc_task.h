@@ -2000,14 +2000,6 @@ public:
         csched = _csched;
     }
 
-    void set_task_csched(bool stable_write)
-    {
-        if (client->mnt_options.nfs_port == 2048) {
-            csched = stable_write ? CONN_SCHED_FH_HASH : CONN_SCHED_RR;
-        }
-        return;
-    }
-
     conn_sched_t get_csched() const
     {
         assert(csched > CONN_SCHED_INVALID &&
