@@ -448,12 +448,6 @@ public:
 
     std::atomic<commit_state_t> commit_state = commit_state_t::COMMIT_NOT_NEEDED;
 
-    /*
-     * commit_lock_5 is used to synchronize flush thread and write thread
-     * for commit operation.
-     */
-    std::mutex commit_lock_5;
-
     /**
      * TODO: Initialize attr with postop attributes received in the RPC
      *       response.

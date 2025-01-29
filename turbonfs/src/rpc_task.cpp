@@ -868,6 +868,7 @@ static void commit_callback(
     assert(!inode->is_stable_write());
     // Caller must be inprogress.
     assert(inode->is_commit_in_progress());
+    assert(inode->get_filecache()->is_flushing_in_progress() == false);
 
     const int status = task->status(rpc_status, NFS_STATUS(res));
     UPDATE_INODE_WCC(inode, res->COMMIT3res_u.resok.file_wcc);
@@ -1001,7 +1002,7 @@ void rpc_task::issue_commit_rpc()
     /*
      * Get the bcs marked for commit_pending.
      */
-    assert(rpc_api->pvt != nullptr);
+    assert(rpc_api->pvt == nullptr);
     rpc_api->pvt = static_cast<void *>(new std::vector<bytes_chunk>(
                 inode->get_filecache()->get_commit_pending_bcs()));
 
@@ -1425,28 +1426,21 @@ static void write_iov_callback(
     /*
      * Check if commit is pending.
      * Any thread that decides to commit and finds that there's an ongoing
-     * flush, will mark the inode as "needing commit" and when the flush
+     * flush, will mark the inode as 'NEEDS_COMMIT' and when the flush
      * completes, we need to start the commit.
      */
     if (!inode->get_filecache()->is_flushing_in_progress()) {
-        bool create_commit_task = false;
+        inode->flush_lock();
+        if (inode->is_commit_pending()) {
+            assert(!inode->is_stable_write());
 
-        {
-            std::unique_lock<std::mutex> lock(inode->commit_lock_5);
-            if (inode->is_commit_pending()) {
-                assert(!inode->is_stable_write());
-                inode->set_commit_in_progress();
-                create_commit_task = true;
-            }
+            /*
+             * We are issuing the commit rpc, so set the commit_in_progress flag.
+             */
+            inode->set_commit_in_progress();
+            inode->commit_membufs();
         }
-
-        if (create_commit_task) {
-            // Create a commit task to commit all bcs needing commit.
-            struct rpc_task *commit_task =
-                    client->get_rpc_task_helper()->alloc_rpc_task_reserved(FUSE_FLUSH);
-            commit_task->init_flush(nullptr /* fuse_req */, ino);
-            commit_task->issue_commit_rpc();
-        }
+        inode->flush_unlock();
     }
 
     /*
@@ -2663,7 +2657,6 @@ static void perform_inline_writes(struct rpc_task *task,
                  * sync_membufs(), but add the task to the commit_waiters list.
                  */
                 inode->sync_membufs(bc_vec, false /* is_flush */, nullptr);
-                inode->flush_unlock();
 
                 /*
                  * Set the commit_in_progress flag to ensure that the commit
@@ -2672,6 +2665,7 @@ static void perform_inline_writes(struct rpc_task *task,
                  * as we need to release the memory.
                  */
                 inode->mark_commit_in_progress();
+                inode->flush_unlock();
 
                 inode->add_task_to_commit_waiters(task);
                 return;
@@ -2827,6 +2821,7 @@ static bool handle_writes(struct nfs_inode *inode,
      * data to the backend
      */
     if (need_commit) {
+        inode->flush_lock();
         /*
          * Set the commit_in_progress flag to ensure that the commit
          * task is startet.
@@ -2835,6 +2830,8 @@ static bool handle_writes(struct nfs_inode *inode,
 
         // XXX What if commit completes before we reach here?
         assert(inode->is_commit_in_progress());
+
+        inode->flush_unlock();
         assert(!need_inline_write);
     }
 

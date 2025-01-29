@@ -440,15 +440,8 @@ void nfs_inode::switch_to_stable_write()
      * If there is something to commit, then commit it and
      * wait for the commit to complete.
      */
-    std::unique_lock<std::mutex> commit_lock(commit_lock_5);
     assert(!is_commit_in_progress());
-    set_commit_in_progress();
-    commit_lock.unlock();
-
-    /*
-     * Issue the commit RPC to commit the dirty membufs.
-     */
-    commit_membufs();
+    mark_commit_in_progress();
 
     /*
      * Wait for the commit to complete.
@@ -497,9 +490,13 @@ bool nfs_inode::check_stable_write_required(off_t offset)
 
 /**
  * commit_membufs() is called by writer thread to commit flushed membufs.
+ * It's always issued under flush_lock().
  */
 void nfs_inode::commit_membufs()
 {
+    assert(is_flushing);
+    assert(is_commit_in_progress());
+
     /*
      * Create the commit task to carry out the write.
      */
@@ -937,8 +934,12 @@ try_copy:
     return err;
 }
 
+/*
+ * This function is called with flush_lock() held.
+ */
 void nfs_inode::mark_commit_in_progress()
 {
+    assert(is_flushing);
     assert(is_stable_write() == false);
 
     /*
@@ -950,42 +951,14 @@ void nfs_inode::mark_commit_in_progress()
      * Note: Ensure lock is held till we set the commit state depending on flushing
      *       going on or not. This lock to synchronize the commit and flush task.
      */
-    bool start_commit_task = false;
-
-    /*
-     * Take the flush_lock to ensure no new flush or commit task is started.
-     * commit_lock is held to synchronize the flush thread and this thread
-     * to set the commit state depending on flushing going on or not.
-     *
-     * Note: flush_lock can't be used as flush task can be started under the
-     *       flush_lock (flush_cache_and_wait()) and it can cause deadlock.
-     *       flush_cache_and_wait() is called under flush_lock and it checks
-     *       if commit required, then it starts the commit task.
-     *
-     * Note: commit_lock held for very small duration, so it's safe to hold in
-     *       fuse context.
-     */
     if (!is_commit_in_progress())
     {
-        std::unique_lock<std::mutex> lock(commit_lock_5 /*commit_lock*/);
-        /*
-         * It may be possible that commit is in progress, so check again.
-         * Might be set by other thread.
-         */
-        if (!is_commit_in_progress())
-        {
-            if (get_filecache()->is_flushing_in_progress()) {
-                set_commit_pending();
-            } else {
-                set_commit_in_progress();
-                start_commit_task = true;
-            }
+        if (get_filecache()->is_flushing_in_progress()) {
+            set_commit_pending();
+        } else {
+            set_commit_in_progress();
+            commit_membufs();
         }
-        lock.unlock();
-    }
-
-    if (start_commit_task) {
-        commit_membufs();
     }
 }
 
