@@ -980,7 +980,6 @@ void nfs_inode::schedule_or_start_commit()
 {
     assert(is_flushing);
     assert(!is_stable_write());
-
     /*
      * We want to commit, but we need to wait for current flushing to complete.
      * 1. If flushing is going on, set commit_pending for the inode, when last
@@ -993,6 +992,7 @@ void nfs_inode::schedule_or_start_commit()
      */
     if (!is_commit_in_progress()) {
         if (get_filecache()->is_flushing_in_progress()) {
+            AZLogWarn("[{}] Flushing in progress, setting commit_pending", ino);
             set_commit_pending();
         } else {
             commit_membufs();
@@ -1233,6 +1233,10 @@ int nfs_inode::wait_for_ongoing_flush_commit(struct rpc_task *task)
          * we come here we should have flushing going on.
          */
         assert(!get_filecache()->is_flushing_in_progress());
+        if (is_commit_pending()) {
+            AZLogInfo("[{}] Commit is pending, we need to start the commit", ino);
+            commit_membufs();
+        }
         wait_for_ongoing_commit();
     }
 
@@ -1497,7 +1501,7 @@ void nfs_inode::flush_lock() const
     return;
 }
 
-void nfs_inode::flush_unlock() const
+void nfs_inode::flush_unlock()
 {
     AZLogDebug("[{}] flush_unlock() called", ino);
 
@@ -1506,7 +1510,9 @@ void nfs_inode::flush_unlock() const
      */
     assert(has_filecache());
     assert(is_flushing == true);
-
+    if (!filecache_handle->is_flushing_in_progress() && is_commit_pending()) {
+        commit_membufs();
+    }
     {
         std::unique_lock<std::mutex> _lock(iflush_lock_3);
         is_flushing = false;
@@ -1516,7 +1522,7 @@ void nfs_inode::flush_unlock() const
     flush_cv.notify_one();
 }
 
-void nfs_inode::truncate_end() const
+void nfs_inode::truncate_end()
 {
     AZLogDebug("[{}] truncate_end() called", ino);
 

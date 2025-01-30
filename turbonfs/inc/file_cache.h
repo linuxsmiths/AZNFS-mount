@@ -1632,7 +1632,7 @@ public:
          * the second one.
          */
         static const uint64_t max_dirty_allowed_per_cache =
-            (max_dirty_extent_bytes() * 2);
+            (max_dirty_extent_bytes() * 4);
         const bool local_pressure =
             ((int64_t) get_bytes_to_flush() > (int64_t) max_dirty_allowed_per_cache);
 

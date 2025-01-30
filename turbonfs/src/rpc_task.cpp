@@ -1430,16 +1430,13 @@ static void write_iov_callback(
      * completes, we need to start the commit.
      */
     if (!inode->get_filecache()->is_flushing_in_progress()) {
-        inode->flush_lock();
-        if (inode->is_commit_pending()) {
-            assert(!inode->is_stable_write());
-
-            /*
-             * We are issuing the commit rpc, so set the commit_in_progress flag.
-             */
-            inode->commit_membufs();
+        if(inode->flushtry_lock()) {
+            if (!inode->get_filecache()->is_flushing_in_progress() &&
+                inode->is_commit_pending()) {
+                inode->commit_membufs();
+            }
+            inode->flush_unlock();
         }
-        inode->flush_unlock();
     }
 
     /*

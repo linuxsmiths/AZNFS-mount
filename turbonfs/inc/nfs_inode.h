@@ -559,7 +559,7 @@ public:
      * change the file size after truncate sets it.
      */
     bool truncate_start(size_t size);
-    void truncate_end() const;
+    void truncate_end();
 
     /**
      * This MUST be called only after has_filecache() returns true, else
@@ -989,7 +989,7 @@ public:
          */
         if (!non_append_writes_seen && (offset != attr.st_size)) {
             non_append_writes_seen = true;
-            AZLogInfo("[{}] Non-append write seen [{}, {}), file size: {}",
+            AZLogDebug("[{}] Non-append write seen [{}, {}), file size: {}",
                       ino, offset, offset+length, attr.st_size);
         }
 
@@ -1512,7 +1512,12 @@ public:
      * Lock the inode for flushing.
      */
     void flush_lock() const;
-    void flush_unlock() const;
+    void flush_unlock();
+
+    bool flushtry_lock()
+    {
+        return !is_flushing.exchange(true);
+    }
 
     /**
      * Revalidate the inode.
