@@ -2523,31 +2523,6 @@ bool bytes_chunk_cache::add_commit_waiter(uint64_t offset,
     return false;
 }
 
-void bytes_chunk_cache::cleanup_on_error()
-{
-    const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
-
-    for (auto it = chunkmap.begin(); it != chunkmap.cend(); ++it) {
-        struct bytes_chunk& bc = it->second;
-        struct membuf *mb = bc.get_membuf();
-        if (!mb->is_inuse() && !mb->is_locked()) {
-            mb->set_inuse();
-            mb->set_locked();
-            if (mb->is_dirty()) {
-                mb->clear_dirty();
-            }
-
-            if (mb->is_flushing()) {
-                mb->clear_flushing();
-            }
-
-            if (mb->is_commit_pending()) {
-                mb->clear_commit_pending();
-            }
-        }
-    }
-}
-
 std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_bc_range(
         uint64_t start_off, uint64_t end_off) const
 {

@@ -1383,9 +1383,7 @@ public:
 
     /**
      * Flush the dirty file cache represented by filecache_handle and wait
-     * till all dirty data is sync'ed with the NFS server. Only dirty data
-     * in the given range is flushed if provided, else all dirty data is
-     * flushed.
+     * till all dirty data is sync'ed with the NFS server.
      * Note that filecache_handle is the only writeback cache that we have
      * and hence this only flushes that.
      * For a non-reg file inode this will be a no-op.
@@ -1400,8 +1398,7 @@ public:
      *       initiate any new flush operations while some truncate call is in
      *       progress (which must have held the is_flushing lock).
      */
-    int flush_cache_and_wait(uint64_t start_off = 0,
-                             uint64_t end_off = UINT64_MAX);
+    int flush_cache_and_wait();
 
     /**
      * Start commit of (all) uncommitted data. Since commit and flush cannot
