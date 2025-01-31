@@ -1180,6 +1180,8 @@ void nfs_client::getattr(
      *       updating nfs_inode::attr during cached writes and then returning
      *       attributes from that instead of making a getattr call here.
      *       We need to think carefully though.
+     *
+     * TODO: flush_cache_and_wait()
      */
     if (inode->is_regfile()) {
         AZLogDebug("[{}] Flushing file data ahead of getattr",

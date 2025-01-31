@@ -34,7 +34,7 @@ nfs_inode::nfs_inode(const struct nfs_fh3 *filehandle,
     assert(write_error == 0);
 
     // TODO: Revert this to false once commit changes integrated.
-    assert(stable_write == true);
+    assert(stable_write == false);
     assert(commit_state == commit_state_t::COMMIT_NOT_NEEDED);
 
 #ifndef ENABLE_NON_AZURE_NFS
@@ -375,10 +375,161 @@ int nfs_inode::get_actimeo_max() const
     }
 }
 
+/*
+ * Caller should hold flush_lock().
+ */
+void nfs_inode::wait_for_ongoing_commit()
+{
+    assert(is_flushing);
+
+    /*
+     * TODO: See if we can eliminate inline sleep.
+     */
+    if (is_commit_in_progress()) {
+        AZLogWarn("[{}] wait_for_ongoing_commit() will sleep inline!!",
+                  get_fuse_ino());
+    }
+
+    while (is_commit_in_progress()) {
+        assert(!get_filecache()->is_flushing_in_progress());
+        ::usleep(1000);
+    }
+
+    assert(!is_commit_in_progress());
+}
+
+/*
+ * This function is called with flush_lock() held.
+ * This should be called whenever we figure out that we cannot proceed with
+ * unstable writes (most common reason being, next write is not an append
+ * write). Once this function returns, following is guaranteed:
+ * - There will be no flushes in progress.
+ * - There will be no commit_pending data and no commit inprogress.
+ * - inode->stable_write will be set to true.
+ */
+void nfs_inode::switch_to_stable_write()
+{
+    assert(is_flushing);
+    assert(!is_stable_write());
+
+    AZLogInfo("[{}] Switching to stable write", ino);
+
+    /*
+     * switch_to_stable_write() is called from places where we are about to
+     * start a flush operation. Before that we check to see if we need to
+     * change to stable write. Since we are not flushing yet and since we
+     * do not support multiple ongoing flushes, we are guaranteed that no
+     * flush should be in progress when we reach here.
+     * Similarly commit should not be in progress.
+     */
+    assert(!is_commit_in_progress());
+    assert(!get_filecache()->is_flushing_in_progress());
+
+    /*
+     * Check if there is anything to commit, if not then
+     * switch to stable write.
+     */
+    if (get_filecache()->get_bytes_to_commit() == 0) {
+        AZLogDebug("[{}] Nothing to commit, switching to stable write", ino);
+        set_stable_write();
+        return;
+    }
+
+    /*
+     * If there is something to commit, then commit it and
+     * wait for the commit to complete.
+     */
+    schedule_or_start_commit();
+
+    /*
+     * Wait for the commit to complete.
+     */
+    wait_for_ongoing_commit();
+
+    assert(get_filecache()->get_bytes_to_commit() == 0);
+    assert(!get_filecache()->is_flushing_in_progress());
+    assert(!is_commit_in_progress());
+
+    set_stable_write();
+    return;
+}
+
+/*
+ * This function checks, whether switch to stable write or not.
+ */
+bool nfs_inode::check_stable_write_required(off_t offset)
+{
+    /*
+     * If stable_write is already set, we don't need to do anything.
+     * We don't need lock here as once stable_write is set it's never
+     * unset.
+     */
+    if (is_stable_write()) {
+        return false;
+    }
+
+    /*
+     * If current write is not append write, then we can't go for unstable writes
+     * It may be overwrite to existing data and we don't have the knowldege of
+     * existing block list, it maye require read modified write. So, we can't go
+     * for unstable write. Similarly, if the offset is more than end of the file,
+     * we need to write zero block in between the current end of the file and the
+     * offset.
+     */
+    if (putblock_filesize != offset) {
+        AZLogInfo("Stable write required as putblock_filesize:{} is not at the"
+            "offset:{}", putblock_filesize, offset);
+
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * commit_membufs() is called by writer thread to commit flushed membufs.
+ * It's always issued under flush_lock().
+ */
+void nfs_inode::commit_membufs()
+{
+    assert(is_flushing);
+
+    set_commit_in_progress();
+
+    /*
+     * Create the commit task to carry out the write.
+     */
+    struct rpc_task *commit_task =
+                get_client()->get_rpc_task_helper()->alloc_rpc_task(FUSE_FLUSH);
+    commit_task->init_flush(nullptr /* fuse_req */, ino);
+    assert(commit_task->rpc_api->pvt == nullptr);
+
+    commit_task->issue_commit_rpc();
+}
+
+/**
+ * sync_membufs()
+ */
 void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
                              bool is_flush,
                              struct rpc_task *parent_task)
 {
+    assert(is_flushing);
+
+    if (!is_stable_write()) {
+        /*
+         * We do not allow a new flush while there's an ongoing one, in case
+         * of unstable writes.
+         */
+        assert(!get_filecache()->is_flushing_in_progress());
+    }
+
+    /*
+     * Stable won't have commit and for unstable we cannot flush while
+     * commit is going on.
+     */
+    assert(!is_commit_in_progress());
+
     if (bc_vec.empty()) {
         return;
     }
@@ -408,11 +559,32 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
     }
 
     /*
+     * If new offset is not at the end of the file,
+     * then we need to switch to stable write.
+     */
+    if (check_stable_write_required(bc_vec[0].offset)) {
+        switch_to_stable_write();
+    }
+
+    /*
      * Create the flush task to carry out the write.
      */
     struct rpc_task *write_task = nullptr;
 
-    // Flush dirty membufs to backend.
+    /*
+     * Flush dirty membufs to backend.
+     * We increment bytes_flushing by 1 before starting any of the flush to
+     * protect is against the condition where whatever flush we have issued
+     * completes till we could issue all the flushes. In write_iov_callback()
+     * we will wrongly treat it as "all flush completed" and start the commit,
+     * while this thread may still keep doing flush for membufs.
+     *
+     * Also assert that for unstable writes, we should never start a new flush
+     * while there is an ongoing flush.
+     */
+    assert((get_filecache()->bytes_flushing == 0) || is_stable_write());
+    get_filecache()->bytes_flushing++;
+
     for (bytes_chunk& bc : bc_vec) {
         /*
          * Get the underlying membuf for bc.
@@ -495,6 +667,14 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
             continue;
         }
 
+        #if 0
+        /*
+         * Update the last flushing offset and length.
+         */
+        last_flushing_offset = bc.offset;
+        last_flushing_length = bc.length;
+        #endif
+
         if (write_task == nullptr) {
             write_task =
                 get_client()->get_rpc_task_helper()->alloc_rpc_task(FUSE_WRITE);
@@ -518,6 +698,10 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
          * Once packed completely, then dispatch the write.
          */
         if (write_task->add_bc(bc)) {
+            assert(is_stable_write() || ((uint64_t) putblock_filesize == bc.offset));
+            putblock_filesize += bc.length;
+            last_flushing_offset = bc.offset;
+            last_flushing_length = bc.length;
             continue;
         } else {
             /*
@@ -543,12 +727,32 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
             // Single bc addition should not fail.
             [[maybe_unused]] bool res = write_task->add_bc(bc);
             assert(res == true);
+            assert(is_stable_write() || ((uint64_t) putblock_filesize == bc.offset));
+            putblock_filesize += bc.length;
+            last_flushing_offset = bc.offset;
+            last_flushing_length = bc.length;
         }
     }
 
     // Dispatch the leftover bytes (or full write).
     if (write_task) {
         write_task->issue_write_rpc();
+    }
+
+    /*
+     * Drop the protective bytes_flushing count.
+     * If bytes_flushing becomes 0 then all flushes issued above have completed
+     * by the time we reached here. Check if we need to start the commit.
+     * Any thread that decides to commit and finds that there's an ongoing
+     * flush, will mark the inode as 'NEEDS_COMMIT' and when the flush
+     * completes, we need to start the commit.
+     */
+    if (--get_filecache()->bytes_flushing == 0) {
+        if (is_commit_pending()) {
+            assert(!is_stable_write());
+
+            commit_membufs();
+        }
     }
 
     /*
@@ -767,14 +971,117 @@ try_copy:
     return err;
 }
 
-/**
- * Note: Caller should call with flush_lock() held.
+/*
+ * This function is called with flush_lock() held.
+ * Once this function is called it's guaranteed that a commit will be done,
+ * either from here or from the last flush (write_iov_callback()).
  */
-int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
+void nfs_inode::schedule_or_start_commit()
 {
-    assert(start_off < end_off);
+    assert(is_flushing);
+    assert(!is_stable_write());
+    /*
+     * We want to commit, but we need to wait for current flushing to complete.
+     * 1. If flushing is going on, set commit_pending for the inode, when last
+     *    membuf flush completes write_iov_callback() will commit the data.
+     * 2. If flushing is not going on, then start commit of data rightaway.
+     *
+     * Note: Ensure lock is held till we set the commit state depending on
+     *       flushing going on or not. This lock is to synchronize the commit
+     *       and flush task.
+     */
+    if (!is_commit_in_progress()) {
+        if (get_filecache()->is_flushing_in_progress()) {
+            AZLogWarn("[{}] Flushing in progress, setting commit_pending", ino);
+            set_commit_pending();
+        } else {
+            commit_membufs();
+        }
+    }
+}
 
-    // Caller must call us with is_flushing lock held.
+void nfs_inode::add_task_to_flush_waiters(struct rpc_task *task)
+{
+    // Must be called only for unstable writes.
+    assert(!is_stable_write());
+    assert(task->magic == RPC_TASK_MAGIC);
+    // Must be a frontend write task.
+    assert(task->get_op_type() == FUSE_WRITE);
+    assert(task->rpc_api->write_task.is_fe());
+
+    /*
+     * Add this task to the flush_waiter list, so that it can be
+     * completed after the flush is done.
+     */
+    if (get_filecache()->add_flush_waiter(last_flushing_offset,
+                                          last_flushing_length,
+                                          task)) {
+        AZLogDebug("[{}] flush in progress, added to flush_waiter list"
+                   " for [{}, {})", ino, last_flushing_offset,
+                   last_flushing_length);
+        return;
+    } else {
+        /*
+         * flush is done, but this task is not added to flush_waiter
+         * list, so complete the write.
+         */
+        AZLogDebug("[{}] Could not add to flush_waiters list, completing "
+                   "write task {}", ino, fmt::ptr(task));
+        task->reply_write(task->rpc_api->write_task.get_size());
+    return;
+    }
+}
+
+void nfs_inode::add_task_to_commit_waiters(struct rpc_task *task)
+{
+    // Must be called only for unstable writes.
+    assert(!is_stable_write());
+    assert(task->magic == RPC_TASK_MAGIC);
+    // Must be a frontend write task.
+    assert(task->get_op_type() == FUSE_WRITE);
+    assert(task->rpc_api->write_task.is_fe());
+
+    /*
+     * Add this task to the commit_waiters list, so that it can be
+     * completed after the commit is done.
+     */
+    if (get_filecache()->add_commit_waiter(last_flushing_offset,
+                                           last_flushing_length,
+                                           task)) {
+        AZLogDebug("[{}] Commit in progress, added to commit_waiters list"
+                   " for [{}, {})", ino, last_flushing_offset,
+                    last_flushing_length);
+        /*
+         * Since we don't complete the write task here, add_commit_waiter()
+         * MUST ensure task will be completed if it returns true.
+         */
+        return;
+    } else {
+        /*
+         * Commit is done, but this task is not added to commit_waiters
+         * list, so complete the write.
+         */
+        AZLogDebug("[{}] Could not add to commit_waiters list, completing "
+                   "write task {}", ino, fmt::ptr(task));
+        task->reply_write(task->rpc_api->write_task.get_size());
+        return;
+    }
+}
+
+/**
+ * Wait for ongoing flushes and commit all uncommitted data.
+ * Caller must call with flush_lock() held.
+ * On return there would be no ongoing flush/commit in progress and all
+ * uncommitted data would have been committed.
+ *
+ * If caller passes a valid frontend write task, the call itself will
+ * return immediately but the task will be completed after flush and commit
+ * have completed. If caller does not pass a tak pointer, then the call
+ * itself would block till all flush and commit complete.
+ */
+int nfs_inode::wait_for_ongoing_flush_commit(struct rpc_task *task)
+{
+    // Caller must call us with flush_lock held.
     assert(is_flushing);
 
     /*
@@ -786,6 +1093,14 @@ int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
         return 0;
     }
 
+    if (task) {
+        assert(task->magic == RPC_TASK_MAGIC);
+        // Must be a frontend write task.
+        assert(task->get_op_type() == FUSE_WRITE);
+        assert(task->rpc_api->write_task.is_fe());
+        assert(task->rpc_api->write_task.get_size() > 0);
+    }
+
     /*
      * If flush() is called w/o open(), there won't be any cache, skip.
      */
@@ -794,80 +1109,175 @@ int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
     }
 
     /*
-     * Flushing not in progress and no new flushing can be started as we hold
-     * the flush_lock().
+     * Stable writes do not need commit, so no commit inprogress and no pending
+     * commit data.
      */
-    if (!get_filecache()->is_flushing_in_progress()) {
-        AZLogDebug("[{}] No flush in progress, returning", ino);
+    if (is_stable_write()) {
+        assert(!is_commit_in_progress());
+        assert(get_filecache()->bytes_commit_pending == 0);
+    }
+
+    if (get_filecache()->is_flushing_in_progress()) {
+        /*
+         * Flushing and committing cannot happen simultaneously.
+         * This is effectively asserting the following:
+         * assert(commit_state != commit_state_t::COMMIT_IN_PROGRESS);
+         */
+        assert(!is_commit_in_progress() || is_commit_pending());
+    } else if (!is_commit_in_progress() &&
+               get_filecache()->bytes_commit_pending == 0) {
+        /*
+         * No flush or commit in progress and nothing to commit, return.
+         */
+        AZLogDebug("[{}] No flush or commit in progress, returning", ino);
+
+        /*
+         * Complete the write task if it was passed.
+         */
+        if (task) {
+            task->reply_write(task->rpc_api->write_task.get_size());
+        }
         return 0;
     }
 
     /*
-     * Get the flushing bytes_chunk from the filecache handle.
-     * This will grab an exclusive lock on the file cache and return the list
-     * of flushing bytes_chunks at that point. Note that we can have new dirty
-     * bytes_chunks created but we don't want to wait for those.
+     * Ok, so either flushing is going on or commit is going on or we have at
+     * least one byte to commit.
      */
-    std::vector<bytes_chunk> bc_vec =
-        filecache_handle->get_flushing_bc_range(start_off, end_off);
+    std::vector<bytes_chunk> bc_vec = {};
+    if ((task == nullptr) && get_filecache()->is_flushing_in_progress()) {
+        /*
+        * Get the flushing bc from the filecache.
+        * We will need to wait for these inline.
+        * Note that we can have new dirty membufs created after the call but
+        * we don't want to wait for those.
+        */
+        bc_vec = filecache_handle->get_flushing_bc_range();
+    }
 
     /*
-     * Our caller expects us to return only after the flush completes.
+     * If there is no task passed, then our caller expects us to return
+     * only after the flush completes (f.e. truncate, switch_to_stable_write).
      * Wait for all the membufs to flush and get result back.
+     * Otherwise add the task to the flush_waiter list for stable write and
+     * commit_waiter list for unstable write.
+     * Task will wait on last flushed offset and length.
      */
-    for (bytes_chunk &bc : bc_vec) {
-        struct membuf *mb = bc.get_membuf();
+    if (task == nullptr) {
+        for (bytes_chunk& bc : bc_vec) {
+            struct membuf *mb = bc.get_membuf();
 
-        assert(mb != nullptr);
-        assert(mb->is_inuse());
+            assert(mb != nullptr);
+            assert(mb->is_inuse());
+            mb->set_locked();
 
-        /*
-         * sync_membufs() would have taken the membuf lock for the duration
-         * of the backend wite that flushes the membuf, so once we get the
-         * lock we know that the flush write has completed.
-         */
-        mb->set_locked();
+            /*
+             * If still dirty after we get the lock, it may mean two things:
+             * - Write failed. We ignore the failure and pretend as if flush
+             *   completed.
+             * - Some other thread got the lock before us and it made the
+             *   membuf dirty again. Since we wanted to wait only for ongoing
+             *   flushes and not newly written data, we ignore this.
+             */
+            if (mb->is_dirty() && get_write_error()) {
+                AZLogError("[{}] Flush [{}, {}) failed with error: {}",
+                           ino, bc.offset, bc.offset + bc.length,
+                           get_write_error());
+            }
 
-        /*
-         * If still dirty after we get the lock, it may mean two things:
-         * - Write failed.
-         * - Some other thread got the lock before us and it made the
-         *   membuf dirty again.
-         */
-        if (mb->is_dirty() && get_write_error()) {
-            AZLogError("[{}] Flush [{}, {}) failed with error: {}",
-                       ino,
-                       bc.offset, bc.offset + bc.length,
-                       get_write_error());
+            mb->clear_locked();
+            mb->clear_inuse();
+
+            /*
+             * Release the bytes_chunk back to the filecache.
+             * These bytes_chunks are not needed anymore as the flush is done.
+             *
+             * Note: We come here for bytes_chunks which were found dirty by the
+             *       above loop. These writes may or may not have been issued by
+             *       us (if not issued by us it was because some other thread,
+             *       mostly the writer issued the write so we found it flushing
+             *       and hence didn't issue). In any case since we have an inuse
+             *       count, release() called from write_callback() would not have
+             *       released it, so we need to release it now.
+             */
+            filecache_handle->release(bc.offset, bc.length);
+        }
+    } else {
+        if (is_stable_write()) {
+            /*
+             * Add task to flush_waiters list.
+             */
+            add_task_to_flush_waiters(task);
+        } else {
+            /*
+             * Add task to commit_waiters list.
+             */
+            add_task_to_commit_waiters(task);
+        }
+    }
+
+    /*
+     * Unstable write case, we need to wait for the commit to complete.
+     * We must start/schedule commit.
+     */
+    if (!is_stable_write()) {
+        schedule_or_start_commit();
+        if (task) {
+            return 0;
         }
 
-        mb->clear_locked();
-        mb->clear_inuse();
-
         /*
-         * Release the bytes_chunk back to the filecache.
-         * These bytes_chunks are not needed anymore as the flush is done.
-         *
-         * Note: We come here for bytes_chunks which were found dirty by the
-         *       above loop. These writes may or may not have been issued by
-         *       us (if not issued by us it was because some other thread,
-         *       mostly the writer issued the write so we found it flushing
-         *       and hence didn't issue). In any case since we have an inuse
-         *       count, release() called from write_callback() would not have
-         *       released it, so we need to release it now.
+         * Wait for the ongoing commit to complete.
+         * If task is not valid we would have waited for all ongoing flushes,
+         * and no new flush can start because we hold the flush_lock, so when
+         * we come here we should have flushing going on.
          */
-        filecache_handle->release(bc.offset, bc.length);
+        assert(!get_filecache()->is_flushing_in_progress());
+        if (is_commit_pending()) {
+            AZLogInfo("[{}] Commit is pending, we need to start the commit", ino);
+            commit_membufs();
+        }
+        wait_for_ongoing_commit();
     }
-    AZLogDebug("[{}] wait_for_ongoing_flush() returning with error: {}",
-              ino, get_write_error());
+
+    /*
+     * As we have flush_lock held, no new flush can be started.
+     * We already waited for the ongoing flush and commit to complete.
+     * For stable write case there should not be any commit pending.
+     * So, following conditions should be true for both stable and
+     * unstable writes.:
+     */
+    assert(!get_filecache()->is_flushing_in_progress());
+    assert(!is_commit_in_progress());
+    assert(get_filecache()->bytes_commit_pending == 0);
+
     return get_write_error();
 }
 
 /**
- * Note: This takes shared lock on ilock_1.
+ * flush_cache_and_wait() is called only from the release/flush call.
+ * It's called with flush_lock() held.
+ * Things it does:
+ * - Before flushing it needs to wait for any ongoing commit to complete.
+ * - First it try to get membufs through get_contiguous_dirty_bcs() or
+ *   get_dirty_bc_range() based on the unstable write or stable write.
+ * - Issue flush for the dirty membufs and wait for the flush to complete.
+ * - If it's unstable write, it issue commit for commit pending membufs.
+ * - Wait for the commit to complete.
+ * - Returns the error code if any.
+ *
+ * Note: Flush_cache_and_wait() blocks the fuse thread till the flush completes.
+ *       It's called from the release(), flush() and getattr() calls. It's ok
+ *       as of now as it's not very often called. We can optimize to complete
+ *       the flush in background and return immediately. For that we need to add
+ *       special handling for the getattr() call.
  */
-int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
+int nfs_inode::flush_cache_and_wait()
 {
+    assert(!is_stable_write() ||
+           get_filecache()->bytes_commit_pending == 0);
+    assert(!is_stable_write() || !is_commit_in_progress());
+
     /*
      * MUST be called only for regular files.
      * Leave the assert to catch if fuse ever calls flush() on non-reg files.
@@ -897,36 +1307,101 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
     }
 
     /*
-     * Grab the inode is_flushing lock to ensure that we doen't initiate
-     * any new flush operation while some truncate call is in progress
-     * (which must have taken the is_flushing lock).
-     * Once flush_lock() returns we have the is_flushing lock and we are
+     * Grab the flush_lock to ensure that we don't initiate any new flushes
+     * while some truncate call is in progress (which must have taken the
+     * flush_lock). Once flush_lock() returns we have the lock and we are
      * guaranteed that no new truncate operation can start till we release
-     * the is_flushing lock. We can safely start the flush then.
+     * the flush_lock. We can safely start the flush then.
      */
     flush_lock();
 
     /*
+     * If flush is in progress, wait for it to complete.
+     * It may happen that last flush is still in progress and we need to wait
+     * for it to complete before we start the new flush.
+     * As we have the flush_lock() we are guaranteed that no new flush can be
+     * started till we release the flush_lock().
+     *
+     * wait_for_ongoing_flush_commit() will wait for the ongoing flush/commt to
+     * complete.
+     *
+     * Note: For stable write case, we don't need to wait for the ongoing flush,
+     *       as there is no commit required for stable write.
+     */
+    if (!is_stable_write()) {
+        const int err = wait_for_ongoing_flush_commit();
+        if (err != 0) {
+            flush_unlock();
+            AZLogError("[{}] Failed to flush cache to stable storage, "
+                        "error={}", ino, err);
+            return err;
+        }
+    }
+
+    /*
+     * For unstable write, If no bytes to flush, then return.
+     * For stable write, If no bytes to flush and no flush in
+     * progress, then return. As for stable write, we didn't
+     * wait for the flush to complete as above.
+     *
+     * TODO: Need to check getattr() call. As that can cause this
+     *       assert to fail.
+     */
+    assert(!get_filecache()->is_flushing_in_progress() ||
+           is_stable_write());
+    assert(!is_commit_in_progress());
+    assert(get_filecache()->bytes_commit_pending == 0);
+
+    if (get_filecache()->get_bytes_to_flush() == 0) {
+        assert(get_filecache()->bytes_dirty == 0);
+        assert(get_filecache()->bytes_flushing == 0);
+
+        AZLogDebug("[{}] Nothing to flush, returning", ino);
+        flush_unlock();
+        return 0;
+    }
+
+    /*
      * Get the dirty bytes_chunk from the filecache handle.
      * This will grab an exclusive lock on the file cache and return the list
-     * of dirty bytes_chunks at that point. Note that we can have new dirty
-     * bytes_chunks created but we don't want to wait for those.
+     * of dirty bytes_chunks at that point.
      */
-    std::vector<bytes_chunk> bc_vec =
-        filecache_handle->get_dirty_bc_range(start_off, end_off);
+    std::vector<bytes_chunk> bc_vec;
+    uint64_t size = 0;
+    if (!is_stable_write()) {
+        bc_vec = filecache_handle->get_contiguous_dirty_bcs(size);
+
+        if (size != get_filecache()->get_bytes_to_flush()) {
+            AZLogInfo("[{}] Flushed size: {} != bytes to flush: {}",
+                        ino, size, get_filecache()->get_bytes_to_flush());
+            AZLogInfo("SWITCHING TO STABLE WRITE");
+
+            /*
+             * This is rare and no-op as we already completed the pending
+             * flush and commit.
+             */
+            switch_to_stable_write();
+            for (auto& bc : bc_vec) {
+                bc.get_membuf()->clear_inuse();
+            }
+            bc_vec = filecache_handle->get_dirty_bc_range();
+        }
+    } else {
+        bc_vec = filecache_handle->get_dirty_bc_range();
+    }
 
     /*
      * sync_membufs() iterate over the bc_vec and starts flushing the dirty
      * membufs. It batches the contiguous dirty membufs and issues a single
      * write RPC for them.
      */
-    sync_membufs(bc_vec, true);
+    sync_membufs(bc_vec, true /* is_flush */);
 
     /*
      * Our caller expects us to return only after the flush completes.
      * Wait for all the membufs to flush and get result back.
      */
-    for (bytes_chunk &bc : bc_vec) {
+    for (bytes_chunk& bc : bc_vec) {
         struct membuf *mb = bc.get_membuf();
 
         assert(mb != nullptr);
@@ -964,19 +1439,42 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
         filecache_handle->release(bc.offset, bc.length);
     }
 
+    /*
+     * Flush_cache_and_wait called from a release call only,
+     * we need to commit all the dirty membufs which are not yet committed.
+     */
+    if (get_filecache()->get_bytes_to_commit() > 0) {
+        assert(!is_stable_write());
+        assert(!is_commit_in_progress());
+        assert(get_filecache()->get_bytes_to_flush() == 0 ||
+               get_write_error() != 0);
+
+        schedule_or_start_commit();
+    }
+
+    /*
+     * Wait for the ongoing commit to complete.
+     */
+    wait_for_ongoing_commit();
     flush_unlock();
 
     /*
-     * If the file is deleted while we still have data in the cache, don't
-     * treat it as a failure to flush. The file has gone and we don't really
-     * care about the unwritten data.
+     * Cleanup on error.
      */
-    if (get_write_error() == ENOENT || get_write_error() == ESTALE) {
-        return 0;
+    if (get_write_error()) {
+        AZLogError("[{}] Failed to flush cache to stable storage, "
+                   "error={}", ino, get_write_error());
     }
+
+    assert(!is_commit_in_progress());
+    assert(!get_filecache()->is_flushing_in_progress());
+    assert(get_filecache()->bytes_dirty == 0);
+    assert(get_filecache()->bytes_commit_pending == 0);
+    assert(get_filecache()->bytes_flushing == 0);
 
     return get_write_error();
 }
+
 
 void nfs_inode::flush_lock() const
 {
@@ -1002,7 +1500,7 @@ void nfs_inode::flush_lock() const
     return;
 }
 
-void nfs_inode::flush_unlock() const
+void nfs_inode::flush_unlock()
 {
     AZLogDebug("[{}] flush_unlock() called", ino);
 
@@ -1011,7 +1509,9 @@ void nfs_inode::flush_unlock() const
      */
     assert(has_filecache());
     assert(is_flushing == true);
-
+    if (!filecache_handle->is_flushing_in_progress() && is_commit_pending()) {
+        commit_membufs();
+    }
     {
         std::unique_lock<std::mutex> _lock(iflush_lock_3);
         is_flushing = false;
@@ -1021,7 +1521,7 @@ void nfs_inode::flush_unlock() const
     flush_cv.notify_one();
 }
 
-void nfs_inode::truncate_end() const
+void nfs_inode::truncate_end()
 {
     AZLogDebug("[{}] truncate_end() called", ino);
 
@@ -1053,7 +1553,7 @@ bool nfs_inode::truncate_start(size_t size)
      */
     flush_lock();
 
-    wait_for_ongoing_flush(0, UINT64_MAX);
+    wait_for_ongoing_flush_commit();
 
     AZLogDebug("[{}] Ongoing flush operations completed", ino);
 
