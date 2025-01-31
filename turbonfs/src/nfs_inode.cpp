@@ -1307,12 +1307,11 @@ int nfs_inode::flush_cache_and_wait()
     }
 
     /*
-     * Grab the inode is_flushing lock to ensure that we doen't initiate
-     * any new flush operation while some truncate call is in progress
-     * (which must have taken the is_flushing lock).
-     * Once flush_lock() returns we have the is_flushing lock and we are
+     * Grab the flush_lock to ensure that we don't initiate any new flushes
+     * while some truncate call is in progress (which must have taken the
+     * flush_lock). Once flush_lock() returns we have the lock and we are
      * guaranteed that no new truncate operation can start till we release
-     * the is_flushing lock. We can safely start the flush then.
+     * the flush_lock. We can safely start the flush then.
      */
     flush_lock();
 
