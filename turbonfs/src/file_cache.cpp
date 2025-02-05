@@ -2651,9 +2651,13 @@ void bytes_chunk_cache::clear_nolock(bool shutdown)
  * TODO: As bcs returned by this function are locked, it block parallel read
  *       on these bcs. Need to check if we can relax lock condition.
  */
-std::vector<bytes_chunk> bytes_chunk_cache::get_commit_pending_bcs() const
+std::vector<bytes_chunk> bytes_chunk_cache::get_commit_pending_bcs(uint64_t *bytes) const
 {
     std::vector<bytes_chunk> bc_vec;
+
+    if (bytes) {
+        *bytes = 0;
+    }
 
     // TODO: Make it shared lock.
     const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
@@ -2668,6 +2672,53 @@ std::vector<bytes_chunk> bytes_chunk_cache::get_commit_pending_bcs() const
             mb->set_locked();
             assert(!mb->is_dirty());
             assert(mb->is_uptodate());
+            bc_vec.emplace_back(bc);
+
+            if (bytes) {
+                *bytes += bc.length;
+            }
+        }
+
+        ++it;
+    }
+
+    return bc_vec;
+}
+
+std::vector<bytes_chunk> bytes_chunk_cache::get_contiguous_dirty_bcs(
+        uint64_t *bytes) const
+{
+    std::vector<bytes_chunk> bc_vec;
+    if (bytes) {
+        *bytes = 0;
+    }
+
+    // TODO: Make it shared lock.
+    const std::unique_lock<std::mutex> _lock(chunkmap_lock_43);
+    auto it = chunkmap.lower_bound(0);
+    uint64_t prev_offset = AZNFSC_BAD_OFFSET;
+
+    while (it != chunkmap.cend()) {
+        const struct bytes_chunk& bc = it->second;
+        struct membuf *mb = bc.get_membuf();
+
+        if (mb->is_dirty() && !mb->is_flushing()) {
+            if (prev_offset != AZNFSC_BAD_OFFSET) {
+                if (prev_offset != bc.offset) {
+                    break;
+                } else {
+                    if (bytes) {
+                        *bytes += bc.length;
+                    }
+                    prev_offset = bc.offset + bc.length;
+                }
+            } else {
+                if (bytes) {
+                    *bytes += bc.length;
+                }
+                prev_offset = bc.offset + bc.length;
+            }
+            mb->set_inuse();
             bc_vec.emplace_back(bc);
         }
 

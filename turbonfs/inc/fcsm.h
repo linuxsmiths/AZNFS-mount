@@ -116,7 +116,7 @@ public:
      * targets from ftgtq/ctgtq as appropriate.
      */
     void on_flush_complete(uint64_t flush_bytes);
-    void on_commit_complete();
+    void on_commit_complete(uint64_t commit_bytes);
 
     /**
      * Is the state machine currently running, i.e. it has sent (one or more)
@@ -178,6 +178,16 @@ public:
     bool fc_cb_running() const
     {
         return (fc_cb_count() > 0);
+    }
+
+    /**
+     * Call when more commit are dispatched, or prepared to be dispatched.
+     * This MUST be called before the commit_callback can be called.
+     */
+    void add_committing(uint64_t bytes)
+    {
+        assert(committed_seq_num <= committing_seq_num);
+        committing_seq_num += bytes;
     }
 
 private:
