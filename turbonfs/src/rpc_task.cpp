@@ -1490,6 +1490,7 @@ static void setattr_callback(
      * inode lock held by truncate_start().
      */
     if (valid & FUSE_SET_ATTR_SIZE) {
+        const struct stat *attr = task->rpc_api->setattr_task.get_attr();
         /*
          * Application can call truncate only on an open fd, hence when we come
          * here we must have the filecache allocated (refer on_fuse_open()), but
@@ -1498,7 +1499,7 @@ static void setattr_callback(
          * then calls FUSE_SETATTR on it without calling open().
          */
         if (inode->has_filecache()) {
-            inode->truncate_end();
+            inode->truncate_end(attr->st_size);
         } else {
             AZLogDebug("[{}] Filecache not present for truncate_end()", ino);
         }
@@ -3010,6 +3011,10 @@ void rpc_task::run_setattr()
             if (inode->has_filecache()) {
                 AZLogDebug("[{}]: Truncating file size to {}",
                            ino, attr->st_size);
+                /*
+                 * Note: This can block for a long time, as it waits for all
+                 *       ongoing IOs to finish.
+                 */
                 inode->truncate_start(attr->st_size);
             }
             
@@ -3072,7 +3077,7 @@ void rpc_task::run_setattr()
             if (valid & FUSE_SET_ATTR_SIZE) {
                 if (inode->has_filecache()) {
                     AZLogDebug("[{}]: Releasing flush_lock", ino);
-                    inode->truncate_end();
+                    inode->truncate_end(attr->st_size);
                 }
             }
 
