@@ -435,6 +435,11 @@ void nfs_inode::switch_to_stable_write()
     if (get_filecache()->get_bytes_to_commit() == 0) {
         AZLogDebug("[{}] Nothing to commit, switching to stable write", ino);
         set_stable_write();
+
+        /*
+         * Now we moved to stable write, cleanup the commit target queue.
+         */
+        get_fcsm()->ctgtq_cleanup();
         return;
     }
 
@@ -459,6 +464,11 @@ void nfs_inode::switch_to_stable_write()
     assert(!is_commit_in_progress());
 
     set_stable_write();
+
+    /*
+     * Now we moved to stable write, cleanup the commit target queue.
+     */
+    get_fcsm()->ctgtq_cleanup();
     return;
 }
 
@@ -1478,6 +1488,11 @@ void nfs_inode::truncate_end(size_t size) const
 
     [[maybe_unused]]
     const uint64_t bytes_truncated = filecache_handle->truncate(size, true /* post */);
+
+    /*
+     * Update the in cache putblock_filesize to reflect the new size.
+     */
+    putblock_filesize = size;
 
     AZLogDebug("[{}] <truncate_end> Filecache truncated to size={} "
                "(bytes truncated: {})",

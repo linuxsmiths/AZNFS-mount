@@ -190,6 +190,11 @@ public:
         committing_seq_num += bytes;
     }
 
+    /*
+     * ctgtq_cleanup() is called when we switch to stable writes.
+     */
+    void ctgtq_cleanup();
+
 private:
     /*
      * The singleton nfs_client, for convenience.

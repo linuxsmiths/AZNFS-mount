@@ -2745,7 +2745,7 @@ void rpc_task::run_write()
         if (inode->is_stable_write()) {
             inode->get_fcsm()->ensure_flush(0, offset, length, this);
         } else {
-                inode->get_fcsm()->ensure_commit(0, this);
+            inode->get_fcsm()->ensure_commit(0, this);
         }
         inode->flush_unlock();
 
