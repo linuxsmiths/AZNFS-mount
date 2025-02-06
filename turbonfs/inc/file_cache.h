@@ -1442,7 +1442,7 @@ public:
          */
         static const uint64_t max_commit_bytes =
             std::min((uint64_t)(max_total * 0.6),
-                     2 * max_dirty_extent_bytes());
+                    2 * max_dirty_extent_bytes());
         assert(max_commit_bytes > 0);
 
         return max_commit_bytes;

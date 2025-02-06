@@ -908,7 +908,7 @@ static void commit_callback(
                 commit_bytes += length;
                 const uint64_t released =
                     inode->get_filecache()->release(offset, length);
-                AZLogDebug("[{}] commit_callback releasing bc [{}, {}), "
+                AZLogInfo("[{}] commit_callback releasing bc [{}, {}), "
                            "released {} bytes",
                            ino, offset, offset+length, released);
                 offset = bc.offset;
@@ -921,11 +921,10 @@ static void commit_callback(
             commit_bytes += length;
             const uint64_t released =
                 inode->get_filecache()->release(offset, length);
-            AZLogDebug("[{}] commit_callback releasing bc [{}, {}), "
+            AZLogInfo("[{}] commit_callback releasing bc [{}, {}), "
                        "released {} bytes",
                        ino, offset, offset+length, released);
         }
-
 
     } else if (NFS_STATUS(res) == NFS3ERR_JUKEBOX) {
         task->get_client()->jukebox_retry(task);

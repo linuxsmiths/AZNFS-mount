@@ -594,6 +594,14 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
     }
 
     /*
+     * If new offset is not at the end of the file,
+     * then we need to switch to stable write.
+     */
+    if (check_stable_write_required(bc_vec[0].offset)) {
+        switch_to_stable_write();
+    }
+
+    /*
      * Create the flush task to carry out the write.
      */
     struct rpc_task *write_task = nullptr;
