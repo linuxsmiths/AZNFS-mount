@@ -1555,9 +1555,9 @@ public:
          * the second one.
          */
         static const uint64_t max_dirty_allowed_per_cache =
-            (max_dirty_extent_bytes() * 4);
+            (max_dirty_extent_bytes() * 2);
         const bool local_pressure =
-            ((int64_t) (bytes_dirty + bytes_commit_pending) > (int64_t) max_dirty_allowed_per_cache);
+            ((int64_t) bytes_dirty  > (int64_t) max_dirty_allowed_per_cache);
 
         if (local_pressure) {
             /*
@@ -1565,9 +1565,8 @@ public:
              * flush the rest.
              */
             const int64_t flush_now =
-                (bytes_dirty + bytes_commit_pending - max_dirty_extent_bytes());
-            assert(flush_now > 0);
-            return std::max((int64_t) AZNFSCFG_WSIZE_MAX, flush_now);
+                (bytes_dirty - max_dirty_extent_bytes());
+            return flush_now;
         }
 
         /*
@@ -1589,7 +1588,7 @@ public:
          */
         const int64_t flush_now =
             (inline_bytes - (bytes_flushing + bytes_commit_pending));
-        return std::max((int64_t) AZNFSCFG_WSIZE_MAX, flush_now);
+        return std::max((int64_t) 0, flush_now);
     }
 
     /**

@@ -2746,9 +2746,7 @@ void rpc_task::run_write()
         if (inode->is_stable_write()) {
             inode->get_fcsm()->ensure_flush(0, offset, length, this);
         } else {
-            inode->get_fcsm()->ensure_commit(
-                inode->get_filecache()->get_inline_flush_bytes(),
-                this);
+                inode->get_fcsm()->ensure_commit(0, this);
         }
         inode->flush_unlock();
 
@@ -2770,9 +2768,7 @@ void rpc_task::run_write()
         } else {
             AZLogDebug("[{}] Committing {} bytes", ino,
                        inode->get_filecache()->max_commit_bytes());
-            inode->get_fcsm()->ensure_commit(
-                inode->get_filecache()->max_commit_bytes(),
-                nullptr);
+            inode->get_fcsm()->ensure_commit(0, nullptr);
         }
         inode->flush_unlock();
 

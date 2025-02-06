@@ -91,14 +91,14 @@ void fcsm::add_flushing(uint64_t bytes)
 void fcsm::ensure_commit(uint64_t commit_bytes,
                          struct rpc_task *task)
 {
-    AZLogDebug("[{}] [FCSM] ensure_commit<{}>({}), task: {}",
+    AZLogInfo("[{}] [FCSM] ensure_commit<{}>({}), task: {}",
                inode->get_fuse_ino(),
                task ? "blocking" : "non-blocking",
                commit_bytes,
                fmt::ptr(task));
-
+    assert(inode->is_flushing == true);
     // commit_bytes must be non-zero.
-    assert(commit_bytes > 0);
+    assert(commit_bytes == 0);
 
     // committed_seq_num can never be more than committing_seq_num.
     assert(committed_seq_num <= committing_seq_num);
@@ -116,6 +116,18 @@ void fcsm::ensure_commit(uint64_t commit_bytes,
     /*
      * What will be the committed_seq_num value after commit_bytes are committed?
      */
+    if (inode->get_filecache()->get_bytes_to_commit() == 0) {
+        int64_t bytes = inode->get_filecache()->get_bytes_to_flush() -
+                          inode->get_filecache()->max_dirty_extent_bytes();
+        commit_bytes = std::max(bytes, (int64_t) 0);
+    } else {
+        commit_bytes = inode->get_filecache()->get_bytes_to_commit();
+    }
+
+    if (commit_bytes == 0) {
+        AZLogInfo("COMMIT BYTES ZERO");
+    }
+
     const uint64_t target_committed_seq_num = committed_seq_num + commit_bytes;
 
     /*
@@ -137,6 +149,7 @@ void fcsm::ensure_commit(uint64_t commit_bytes,
                       0 /* target flush_seq */,
                       target_committed_seq_num /* target commit_seq */,
                       task);
+        assert(is_running());
         return;
     }
 
@@ -147,7 +160,7 @@ void fcsm::ensure_commit(uint64_t commit_bytes,
      * with the target_committed_seq_num.
      */
     if (flushed_seq_num < target_committed_seq_num) {
-        AZLogDebug("[{}] [FCSM] not running, schedule a new flush to catch up, "
+        AZLogInfo("[{}] [FCSM] not running, schedule a new flush to catch up, "
                    "flushed_seq_num: {}, target_committed_seq_num: {}",
                    inode->get_fuse_ino(),
                    flushed_seq_num.load(),
@@ -164,6 +177,7 @@ void fcsm::ensure_commit(uint64_t commit_bytes,
                       0 /* target flush_seq */,
                       target_committed_seq_num /* target commit_seq */,
                       task);
+        assert(is_running());
         return;
     } else {
         AZLogDebug("[{}] [FCSM] not running, schedule a new commit,"
@@ -183,7 +197,7 @@ void fcsm::ensure_commit(uint64_t commit_bytes,
         * It may happen due writes are changed to stable write.
         */
         if (bytes == 0) {
-            assert(inode->is_stable_write());
+            assert(inode->is_stable_write() || commit_bytes == 0);
             if (task) {
                 AZLogDebug("[{}] [FCSM] not running and nothing to commit, "
                            "completing fuse write rightaway",
@@ -207,7 +221,8 @@ void fcsm::ensure_flush(uint64_t flush_bytes,
                         uint64_t write_len,
                         struct rpc_task *task)
 {
-    AZLogDebug("[{}] [FCSM] ensure_flush<{}>({}), write req [{}, {}), task: {}",
+    assert(inode->is_flushing == true);
+    AZLogInfo("[{}] [FCSM] ensure_flush<{}>({}), write req [{}, {}), task: {}",
                inode->get_fuse_ino(),
                task ? "blocking" : "non-blocking",
                flush_bytes,
@@ -288,6 +303,7 @@ void fcsm::ensure_flush(uint64_t flush_bytes,
                       target_flushed_seq_num /* target flush_seq */,
                       0 /* commit_seq */,
                       task);
+        assert(is_running());
         return;
     }
 
@@ -304,22 +320,7 @@ void fcsm::ensure_flush(uint64_t flush_bytes,
         bc_vec = inode->get_filecache()->get_contiguous_dirty_bcs(&bytes);
     }
     assert(bc_vec.empty() == (bytes == 0));
-
-    /*
-     * FCSM not running and nothing to flush, complete the task and return.
-     * Note that moe dirty data can be added after we get the list of dirty
-     * and non-flushing bcs above, but they can be flushed at a later point.
-     */
-    if (bytes == 0) {
-
-        if (task) {
-            AZLogDebug("[{}] [FCSM] not running and nothing to flush, "
-                       "completing fuse write [{}, {}) rightaway",
-                       inode->get_fuse_ino(), write_off, write_off+write_len);
-            task->reply_write(write_len);
-        }
-        return;
-    }
+    assert(bytes > 0);
 
     /*
      * If new offset is not at the end of the file,
@@ -328,7 +329,7 @@ void fcsm::ensure_flush(uint64_t flush_bytes,
     if (inode->check_stable_write_required(bc_vec[0].offset)) {
 
         if (inode->get_filecache()->get_bytes_to_commit() == 0) {
-            AZLogDebug("[{}] [FCSM] switching to stable write, "
+            AZLogInfo("[{}] [FCSM] switching to stable write, "
                        "nothing to commit",
                         inode->get_fuse_ino());
             inode->set_stable_write();
@@ -386,7 +387,7 @@ void fcsm::ensure_flush(uint64_t flush_bytes,
                 mb->clear_inuse();
             }
             clear_running();
-            ensure_commit(inode->get_filecache()->get_bytes_to_commit(), nullptr);
+            ensure_commit(0, nullptr);
             return;
         }
     }
@@ -512,11 +513,9 @@ void fcsm::on_commit_complete(uint64_t commit_bytes)
     /*
      * See if we have more commit targets and issue flush for the same.
      */
-    if (!ctgtq.empty()) {
-        assert(ctgtq.front().commit_seq > committed_seq_num);
-        ensure_flush(0, 0, 0, nullptr);
-    } else if (ctgtq.empty() && !ftgtq.empty() &&
-               (ftgtq.front().flush_seq > flushing_seq_num)) {
+    if (!ftgtq.empty() || !ctgtq.empty()) {
+        assert(ftgtq.empty() || ftgtq.front().flush_seq > flushed_seq_num);
+        assert(ctgtq.empty() || ctgtq.front().commit_seq > committed_seq_num);
        /*
         * See if we have more flush targets and issue them.
         */
@@ -567,6 +566,7 @@ void fcsm::on_commit_complete(uint64_t commit_bytes)
          * we should not clear the running flag.
          */
         if(!inode->get_filecache()->is_flushing_in_progress()) {
+            assert(ctgtq.empty() && ftgtq.empty());
             clear_running();
         }
     }
@@ -591,7 +591,7 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
     assert(fc_cb_running());
 
     // Flush callback can only be called if FCSM is running.
-    assert(is_running());
+    // assert(is_running());
 
     // Update flushed_seq_num to account for the newly flushed bytes.
     flushed_seq_num += flush_bytes;
@@ -599,7 +599,7 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
     // flushed_seq_num can never go more than flushing_seq_num.
     assert(flushed_seq_num <= flushing_seq_num);
 
-    AZLogDebug("[{}] [FCSM] on_flush_complete({}), flushed_seq_num now: {}, "
+    AZLogInfo("[{}] [FCSM] on_flush_complete({}), flushed_seq_num now: {}, "
                "flushing_in_progress: {}",
                inode->get_fuse_ino(),
                flush_bytes,
@@ -624,7 +624,14 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
      * queued flush targets which includes completing the waiting tasks and/or
      * trigger pending flush/commit.
      */
-    if (inode->get_filecache()->is_flushing_in_progress()) {
+    if (inode->get_filecache()->is_flushing_in_progress() ||
+        !is_running() ||
+        inode->is_commit_in_progress()) {
+        AZLogInfo("[{}] [FCSM] not running, flushing_seq_num now: {}, "
+                   "flushed_seq_num: {}",
+                   inode->get_fuse_ino(),
+                   flushing_seq_num.load(),
+                   flushed_seq_num.load());
         inode->flush_unlock();
         return;
     }
@@ -688,6 +695,7 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
 
     /*
      * Check if there commit target to be triggered.
+     * If we flushed, we should trigger commit so that memory is released.
      */
     if (!ctgtq.empty() && (ctgtq.front().commit_seq < flushed_seq_num)) {
         uint64_t bytes;
@@ -741,7 +749,7 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
         // sync_membufs() will update flushing_seq_num() and mark fcsm running.
         inode->sync_membufs(bc_vec, false /* is_flush */);
         assert(flushing_seq_num >= bytes);
-    } else if (ftgtq.empty()) {
+    } else if (ftgtq.empty() && ctgtq.empty()) {
         AZLogDebug("[{}] [FCSM] idling, flushing_seq_num now: {}, "
                    "flushed_seq_num: {}",
                    inode->get_fuse_ino(),
@@ -749,15 +757,19 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
                    flushed_seq_num.load());
 
         // FCSM should not idle when there's any ongoing flush.
-        assert(flushing_seq_num == flushed_seq_num);
+        assert(flushing_seq_num >= flushed_seq_num);
 
         /*
          * If commit is in progress, then we should not clear
          * the running flag. Most likely it's issued from flush_cache_and_wait().
          */
         if (!inode->is_commit_in_progress()) {
+            assert(ftgtq.empty() || ctgtq.empty());
             clear_running();
         }
+    } else {
+        assert(0);
+        AZLogInfo("SHould not reach here");
     }
 
     inode->flush_unlock();
