@@ -925,9 +925,6 @@ int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
                         get_write_error());
             }
 
-            mb->clear_locked();
-            mb->clear_inuse();
-
             /*
              * Release the bytes_chunk back to the filecache.
              * These bytes_chunks are not needed anymore as the flush is done.
@@ -941,6 +938,9 @@ int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
              *       have released it, so we need to release it now.
              */
             filecache_handle->release(bc.offset, bc.length);
+
+            mb->clear_locked();
+            mb->clear_inuse();
         }
 
         // Re-grab flush_lock, now that the wait is over.
@@ -1059,9 +1059,6 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
                        get_write_error());
         }
 
-        mb->clear_locked();
-        mb->clear_inuse();
-
         /*
          * Release the bytes_chunk back to the filecache.
          * These bytes_chunks are not needed anymore as the flush is done.
@@ -1075,6 +1072,9 @@ int nfs_inode::flush_cache_and_wait(uint64_t start_off, uint64_t end_off)
          *       released it, so we need to release it now.
          */
         filecache_handle->release(bc.offset, bc.length);
+
+        mb->clear_locked();
+        mb->clear_inuse();
     }
 
     /*

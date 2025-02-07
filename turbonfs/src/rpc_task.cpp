@@ -3224,13 +3224,6 @@ void rpc_task::run_read()
             // Check if the buffer got updated by the time we got the lock.
             if (bc_vec[i].get_membuf()->is_uptodate()) {
                 /*
-                * Release the lock since we no longer intend on writing
-                * to this buffer.
-                */
-                bc_vec[i].get_membuf()->clear_locked();
-                bc_vec[i].get_membuf()->clear_inuse();
-
-                /*
                  * Set "bytes read" to "bytes requested" since the data is read
                  * from the cache.
                  */
@@ -3250,6 +3243,14 @@ void rpc_task::run_read()
                  */
                 filecache_handle->release(bc_vec[i].offset, bc_vec[i].length);
 #endif
+
+                /*
+                 * Release the lock since we no longer intend on writing
+                 * to this buffer.
+                 */
+                bc_vec[i].get_membuf()->clear_locked();
+                bc_vec[i].get_membuf()->clear_inuse();
+
                 continue;
             }
 
@@ -3299,8 +3300,6 @@ void rpc_task::run_read()
             AZLogDebug("[{}] Data read from cache. offset: {}, length: {}",
                        ino, bc_vec[i].offset, bc_vec[i].length);
 
-            bc_vec[i].get_membuf()->clear_inuse();
-
             /*
              * Set "bytes read" to "bytes requested" since the data is read
              * from the cache.
@@ -3317,9 +3316,15 @@ void rpc_task::run_read()
              * Note that this is just a suggestion to release the buffer.
              * The buffer may not be released if it's in use by any other
              * user.
+             *
+             * Note: We have to grab the membuf lock here because release()
+             *       asserts for that.
              */
+            bc_vec[i].get_membuf()->set_locked();
             filecache_handle->release(bc_vec[i].offset, bc_vec[i].length);
+            bc_vec[i].get_membuf()->clear_locked();
 #endif
+            bc_vec[i].get_membuf()->clear_inuse();
         }
     }
 
@@ -3366,10 +3371,10 @@ void rpc_task::run_read()
 
 void rpc_task::send_read_response()
 {
-    [[maybe_unused]] const fuse_ino_t ino = rpc_api->read_task.get_ino();
-
     // This should always be called on the parent task.
     assert(rpc_api->parent_task == nullptr);
+
+    [[maybe_unused]] const fuse_ino_t ino = rpc_api->read_task.get_ino();
 
     /*
      * We must send response only after all component reads complete, they may
@@ -3729,17 +3734,9 @@ static void read_callback(
                 res->READ3res_u.resok.eof) {
                 assert(res->READ3res_u.resok.count < issued_length);
 
-                /*
-                 * We need to clear the inuse count held by this thread, else
-                 * release() will not be able to release. We drop and then
-                 * promptly grab the inuse count after the release(), so that
-                 * set_uptodate() can be called.
-                 */
-                bc->get_membuf()->clear_inuse();
                 const uint64_t released_bytes =
                     filecache_handle->release(bc->offset + bc->pvt,
                                               bc->length - bc->pvt);
-                bc->get_membuf()->set_inuse();
 
                 /*
                  * If we are able to successfully release all the extra bytes
@@ -3796,15 +3793,6 @@ static void read_callback(
                    errstr);
     }
 
-    /*
-    * Release the lock that we held on the membuf since the data is now
-    * written to it.
-    * The lock is needed only to write the data and not to just read it.
-    * Hence it is safe to read this membuf even beyond this point.
-    */
-    bc->get_membuf()->clear_locked();
-    bc->get_membuf()->clear_inuse();
-
 #ifdef RELEASE_CHUNK_AFTER_APPLICATION_READ
     /*
     * Since we come here only for client reads, we will not cache the data,
@@ -3813,6 +3801,15 @@ static void read_callback(
     */
     filecache_handle->release(bc->offset, bc->length);
 #endif
+
+    /*
+    * Release the lock that we held on the membuf since the data is now
+    * written to it.
+    * The lock is needed only to write the data and not to just read it.
+    * Hence it is safe to read this membuf even beyond this point.
+    */
+    bc->get_membuf()->clear_locked();
+    bc->get_membuf()->clear_inuse();
 
     // For failed status we must never mark the buffer uptodate.
     assert(!status || !bc->get_membuf()->is_uptodate());

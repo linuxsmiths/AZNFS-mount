@@ -178,12 +178,22 @@ membuf::~membuf()
  */
 void membuf::trim(uint64_t trim_len, bool left)
 {
+    /*
+     * trim() is called from release(), and user calls release() while they
+     * own the membuf, so it should be both locked and inuse.
+     */
+    assert(is_inuse());
+    assert(is_locked());
+
     // Can't trim more than the current size.
     assert(trim_len > 0);
     assert(trim_len <= length);
 
-    length -= trim_len;
-
+    /*
+     * Update offset and length to reflect values after trim.
+     * Note that these membuf fields are not really used, other than logging
+     * and probably asserting.
+     */
     if (left) {
         offset += trim_len;
         /*
@@ -192,15 +202,12 @@ void membuf::trim(uint64_t trim_len, bool left)
          *       bytes_chunk::get_buffer().
          */
     }
+    length -= trim_len;
 
     /*
      * Cannot safely trim a membuf that's
-     * - in use by some other thread.
      * - flushing in progress.
      * - commit pending.
-     *
-     * Note that we need to allow locked membufs to be trimmed. Most callers
-     * call release() with membuf lock still held.
      *
      * We don't want to surprise the user.
      *
@@ -208,9 +215,9 @@ void membuf::trim(uint64_t trim_len, bool left)
      * trim() but it releases the lock and inuse count before calling trim().
      * Since it's holding the chunkmap lock, no other thread can get ref on
      * the membuf.
+     *
+     * Only bytes_chunk_cache::truncate() can call trim for dirty membufs.
      */
-    assert(!is_inuse());
-    //assert(!is_locked());
     assert(!is_flushing());
     assert(!is_commit_pending());
 
@@ -884,12 +891,16 @@ bytes_chunk::bytes_chunk(bytes_chunk_cache *_bcc,
     assert(length > 0);
     assert(length <= alloc_buffer->length);
 
+    /*
+     * bc being created from membuf, must lie within it.
+     * It must refer to the whole membuf or part of it.
+     */
+    assert(offset >= alloc_buffer->offset);
+    assert(length <= alloc_buffer->length);
+
     // bc must only refer to valid part of membuf.
     assert(buffer_offset >= (alloc_buffer->offset -
                              alloc_buffer->initial_offset));
-    assert((buffer_offset + length) <= (alloc_buffer->offset +
-                                        alloc_buffer->length -
-                                        alloc_buffer->initial_offset));
     assert(alloc_buffer->length <= AZNFSC_MAX_CHUNK_SIZE);
     assert((offset + length) <= AZNFSC_MAX_FILE_SIZE);
 
@@ -1398,7 +1409,7 @@ do { \
     for (; remaining_length != 0 && it != chunkmap.end(); ) {
         bc = &(it->second);
 
-        // membuf and bc offset and length must always be in sync.
+        // membuf and chunkmap bc offset and length must always be in sync.
         assert(bc->length == bc->get_membuf()->length);
         assert(bc->offset == bc->get_membuf()->offset);
 
@@ -1444,6 +1455,12 @@ do { \
                              fmt::ptr(bc->alloc_buffer->get()));
             } else if (bc->safe_to_release()) {
                 assert(action == scan_action::SCAN_ACTION_RELEASE);
+
+                /*
+                 * Caller should only release chunks that it owns, i.e., it
+                 * must be locked by the caller.
+                 */
+                assert(bc->get_membuf()->is_locked());
 
                 /*
                  * chunk_length bytes will be released.
@@ -1610,6 +1627,12 @@ do { \
             } else if (bc->safe_to_release()) {
                 assert(action == scan_action::SCAN_ACTION_RELEASE);
                 assert(chunk_length <= remaining_length);
+
+                /*
+                 * Caller should only release chunks that it owns, i.e., it
+                 * must be locked by the caller.
+                 */
+                assert(bc->get_membuf()->is_locked());
 
                 /*
                  * We have two cases:
@@ -1865,6 +1888,12 @@ allocate_only_chunk:
                  * guaranteed safe-to-delete, so check before deleting.
                  */
                 if (bc->safe_to_release()) {
+                    /*
+                     * Caller should only release chunks that it owns, i.e., it
+                     * must be locked by the caller.
+                     */
+                    assert(bc->get_membuf()->is_locked());
+
                     AZLogVerbose("<Release [{}, {})> (freeing chunk) [{},{}) "
                                  "b:{} a:{}",
                                  offset, offset + length,
@@ -2000,7 +2029,7 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
         }
 
         /*
-         * Add iterators to all the affected bcs in it_vec1.
+         * Save iterators to all the affected bcs in it_vec1.
          * Note that since we don't remove an inuse bc from the chunkmap, it's
          * safe to access these iterators after the chunkmap lock is released.
          */
@@ -2061,16 +2090,9 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
             struct bytes_chunk& bc = it->second;
             struct membuf *mb = bc.get_membuf();
 
-            // membuf and bc offset and length must always be in sync.
+            // membuf and chunkmap bc offset and length must always be in sync.
             assert(bc.length == mb->length);
             assert(bc.offset == mb->offset);
-
-            /*
-             * Clear these as we don't want to trim or destroy an inuse membuf.
-             * It's safe as we have the chunkmap lock.
-             */
-            mb->clear_locked();
-            mb->clear_inuse();
 
             /*
              * it_vec3 should not have any bc that lies completely before
@@ -2097,6 +2119,10 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
                 // Trim membuf.
                 mb->trim(trim_bytes, false /* left */);
 
+                // Release the lock as we are done trimming.
+                mb->clear_locked();
+                mb->clear_inuse();
+
                 assert(bytes_cached >= trim_bytes);
                 assert(bytes_cached_g >= trim_bytes);
                 bytes_cached -= trim_bytes;
@@ -2122,6 +2148,10 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
                 bytes_truncated += bc.length;
 
                 mb->set_truncated();
+
+                mb->clear_locked();
+                mb->clear_inuse();
+
                 chunkmap.erase(it);
             }
         }
@@ -2520,8 +2550,16 @@ void bytes_chunk_cache::clear_nolock(bool shutdown)
                    bc->get_membuf_usecount(),
                    start_size - chunkmap.size(), start_size);
 
+        /*
+         * XXX Now release() enforces that the caller must be owning the
+         *     membuf and must be the only one owning it, i.e., inuse count
+         *     must be 1, but clear() is done for releasing not the membufs
+         *     that you own but everything that can be safely removed.
+         */
+#if 0
         // Make sure the compound check also passes.
         assert(bc->safe_to_release() || shutdown);
+#endif
 
         /*
          * Release the chunk.
