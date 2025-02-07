@@ -864,8 +864,10 @@ static void commit_callback(
 
     const int status = task->status(rpc_status, NFS_STATUS(res));
     UPDATE_INODE_WCC(inode, res->COMMIT3res_u.resok.file_wcc);
+    FC_CB_TRACKER fccbt(inode);
 
     AZLogDebug("[{}] commit_callback", ino);
+    
     uint64_t commit_bytes = 0;
     /*
      * Now that the request has completed, we can query libnfs for the
@@ -968,6 +970,8 @@ static void commit_callback(
 
         // Update the commit bytes in the inode.
         inode->get_fcsm()->on_commit_complete(commit_bytes);
+    } else {
+        assert(0);
     }
 
     delete bc_vec_ptr;
@@ -975,7 +979,7 @@ static void commit_callback(
     task->free_rpc_task();
 }
 
-void rpc_task::issue_commit_rpc(std::vector<bytes_chunk>& bc_vec)
+void rpc_task::issue_commit_rpc()
 {
     // Must only be called for a flush task.
     assert(get_op_type() == FUSE_FLUSH);
@@ -1001,8 +1005,7 @@ void rpc_task::issue_commit_rpc(std::vector<bytes_chunk>& bc_vec)
     /*
      * Get the bcs marked for commit_pending.
      */
-    assert(rpc_api->pvt == nullptr);
-    rpc_api->pvt = static_cast<void *>(new std::vector<bytes_chunk>(bc_vec));
+    assert(rpc_api->pvt != nullptr);
 
     args.file = inode->get_fh();
     args.offset = 0;
@@ -1408,6 +1411,8 @@ static void write_iov_callback(
      */
     if (inode->get_write_error() == 0) {
         inode->get_fcsm()->on_flush_complete(bciov->orig_length);
+    } else {
+        assert(0);
     }
 
     delete bciov;

@@ -45,7 +45,7 @@ fcsm::fctgt::fctgt(struct fcsm *fcsm,
     }
 #endif
 
-    AZLogDebug("[{}] [FCSM] {} fctgt queued (F: {}, C: {}, T: {})",
+    AZLogInfo("[{}] [FCSM] {} fctgt queued (F: {}, C: {}, T: {})",
                fcsm->get_inode()->get_fuse_ino(),
                task ? "Blocking" : "Non-blocking",
                flush_seq,
@@ -93,7 +93,7 @@ void fcsm::ctgtq_cleanup()
     assert(inode->is_flushing);
     assert(inode->is_stable_write());
 
-    AZLogInfo("[FCSM][{}] ctgtq_cleanup()", inode->get_fuse_ino());
+    AZLogDebug("[FCSM][{}] ctgtq_cleanup()", inode->get_fuse_ino());
     while (!ctgtq.empty()) {
         struct fctgt &ctgt = ctgtq.front();
         assert(ctgt.fcsm == this);
@@ -123,7 +123,7 @@ void fcsm::ctgtq_cleanup()
 void fcsm::ensure_commit(uint64_t commit_bytes,
                          struct rpc_task *task)
 {
-    AZLogInfo("[{}] [FCSM] ensure_commit<{}>({}), task: {}",
+    AZLogDebug("[{}] [FCSM] ensure_commit<{}>({}), task: {}",
                inode->get_fuse_ino(),
                task ? "blocking" : "non-blocking",
                commit_bytes,
@@ -262,7 +262,7 @@ void fcsm::ensure_flush(uint64_t flush_bytes,
                         struct rpc_task *task)
 {
     assert(inode->is_flushing == true);
-    AZLogDebug("[{}] [FCSM] ensure_flush<{}>({}), write req [{}, {}), task: {}",
+    AZLogDebug("[{}] [FCSM] ensure_flush<{}>({}), write req [{}, {}], task: {}",
                inode->get_fuse_ino(),
                task ? "blocking" : "non-blocking",
                flush_bytes,
@@ -305,7 +305,10 @@ void fcsm::ensure_flush(uint64_t flush_bytes,
      */
     const uint64_t bytes_to_flush =
         inode->get_filecache()->get_bytes_to_flush();
-    const uint64_t target_flushed_seq_num = flushing_seq_num + bytes_to_flush;
+    const uint64_t last_flush_seq =
+                !ftgtq.empty() ? ftgtq.front().flush_seq : 0;
+    const uint64_t target_flushed_seq_num =
+             std::max((flushing_seq_num + bytes_to_flush), last_flush_seq);
 
     /*
      * If the state machine is already running, we just need to add an
@@ -340,6 +343,12 @@ void fcsm::ensure_flush(uint64_t flush_bytes,
             }
         }
 #endif
+        if (task == nullptr &&
+             (target_flushed_seq_num == last_flush_seq)) {
+            assert(is_running());
+            return;
+        }
+
         ftgtq.emplace(this,
                       target_flushed_seq_num /* target flush_seq */,
                       0 /* commit_seq */,
@@ -443,7 +452,7 @@ void fcsm::on_commit_complete(uint64_t commit_bytes)
                 assert(tgt.task->rpc_api->write_task.is_fe());
                 assert(tgt.task->rpc_api->write_task.get_size() > 0);
 
-                AZLogDebug("[{}] [FCSM] completing blocking commit target: {}, "
+                AZLogInfo("[{}] [FCSM] completing blocking commit target: {}, "
                            "committed_seq_num: {}, write task: [{}, {})",
                            inode->get_fuse_ino(),
                            tgt.commit_seq,
@@ -632,7 +641,7 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
                 assert(tgt.task->rpc_api->write_task.is_fe());
                 assert(tgt.task->rpc_api->write_task.get_size() > 0);
 
-                AZLogDebug("[{}] [FCSM] completing blocking flush target: {}, "
+                AZLogInfo("[{}] [FCSM] completing blocking flush target: {}, "
                         "flushed_seq_num: {}, write task: [{}, {})",
                         inode->get_fuse_ino(),
                         tgt.flush_seq,
@@ -709,7 +718,13 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
          * have the corresponding bcs in the file cache.
          */
         assert(!bc_vec.empty());
-        assert(bytes >= (ftgtq.front().flush_seq - flushing_seq_num));
+
+        if (inode->is_stable_write()) {
+            // We should have all the dirty data in the chunkmap.
+            assert(bytes >= (ftgtq.front().flush_seq - flushed_seq_num));
+        } else {
+            assert(bytes > 0);
+        }
 
         // flushed_seq_num can never be more than flushing_seq_num.
         assert(flushed_seq_num <= flushing_seq_num);
