@@ -88,6 +88,184 @@ void fcsm::add_flushing(uint64_t bytes)
     flushing_seq_num += bytes;
 }
 
+void fcsm::run(struct rpc_task *task,
+               uint64_t extent_left,
+               uint64_t extent_right)
+{
+#ifdef NDEBUG
+    assert(task->magic == RPC_TASK_MAGIC);
+    assert(task->get_op_type() == FUSE_WRITE);
+    assert(task->rpc_api->write_task.is_fe());
+    assert(task->rpc_api->write_task.get_size() > 0);
+#endif
+
+    const size_t length = task->rpc_api->write_task.get_size();
+    const off_t offset = task->rpc_api->write_task.get_offset();
+    const bool sparse_write = false;
+    const fuse_ino_t ino = task->rpc_api->write_task.get_ino();
+
+    /*
+     * We have successfully copied the user data into the cache.
+     * We can have the following cases (in decreasing order of criticality):
+     * 1. Cache has dirty+uncommitted data beyond the "inline write threshold",
+     *    ref do_inline_write().
+     *    In this case we begin flush of the dirty data and/or commit of the
+     *    uncommitted data.
+     *    This is a memory pressure situation and hence we do not complete the
+     *    application write till all the above backend writes complete.
+     *    This will happen when application is writing faster than our backend
+     *    write throughput, eventually dirty data will grow beyond the "inline
+     *    write threshold" and then we have to slow down the writers by delaying
+     *    completion.
+     * 2. Cache has uncommitted data beyond the "commit threshold", ref
+     *    commit_required().
+     *    In this case we free up space in the cache by committing data.
+     *    We just initiate a commit while the current write request is
+     *    completed. Note that we want to delay commits so that we can reduce
+     *    the commit calls (commit more data per call) as commit calls sort
+     *    of serialize the writes as we cannot send any other write to the
+     *    server while commit is on.
+     * 3. Cache has enough dirty data that we can flush.
+     *    For sequential writes, this means the new write caused a contiguous
+     *    extent to be greater than max_dirty_extent_bytes(), aka MDEB, while
+     *    for non-seq writes it would mean that the total dirty data grew beyond
+     *    MDEB.
+     *    In this case we begin flush of this contiguous extent (in multiple
+     *    parallel wsize sized blocks) since there's no benefit in waiting more
+     *    as the data is sufficient for the server scheduler to effectively
+     *    write, in optimal sized blocks.
+     *    We complete the application write rightaway without waiting for the
+     *    flush to complete as we are not under memory pressure.
+     *
+     * Other than this we have a special case of "write beyond eof" (termed
+     * sparse write). In sparse write case also we perform "inline write" of
+     * all the dirty data. This is needed for correct read behaviour. Imagine
+     * a reader reading from the sparse part of the file which is not yet in
+     * the bytes_chunk_cache. This read will be issued to the server and since
+     * server doesn't know the updated file size (as the write may still be
+     * sitting in our bytes_chunk_cache) it will return eof. This is not correct
+     * as such reads issued after successful write, are valid and should return
+     * 0 bytes for the sparse range.
+     */
+
+    /*
+     * If the extent size exceeds the max allowed dirty size as returned by
+     * max_dirty_extent_bytes(), then it's time to flush the extent.
+     * Note that this will cause sequential writes to be flushed at just the
+     * right intervals to optimize fewer write calls and also allowing the
+     * server scheduler to merge better.
+     * See bytes_to_flush for how random writes are flushed.
+     *
+     * Note: max_dirty_extent is static as it doesn't change after it's
+     *       queried for the first time.
+     */
+    static const uint64_t max_dirty_extent =
+        inode->get_filecache()->max_dirty_extent_bytes();
+    assert(max_dirty_extent > 0);
+
+    /*
+     * Check what kind of limit we have hit.
+     */
+    const bool need_inline_write =
+        (sparse_write || inode->get_filecache()->do_inline_write());
+    const bool need_commit =
+        inode->get_filecache()->commit_required();
+    const bool need_flush =
+        ((extent_right - extent_left) >= max_dirty_extent) ||
+        inode->get_filecache()->flush_required();
+
+    AZLogDebug("[{}] handle write (sparse={}, need_inline_write={}, "
+               "need_commit={}, need_flush={}, extent=[{}, {}))",
+               inode->get_fuse_ino(), sparse_write, need_inline_write,
+               need_commit, need_flush, extent_left, extent_right);
+
+    /*
+     * Nothing to do, we can complete the application write rightaway.
+     * This should be the happy path!
+     */
+    if (!need_inline_write && !need_commit && !need_flush) {
+        task->reply_write(length);
+        return;
+    }
+
+    /*
+     * Do we need to perform "inline write"?
+     * Inline write implies, we flush all the dirty data and wait for all the
+     * corresponding backend writes to complete.
+     */
+    if (need_inline_write) {
+        INC_GBL_STATS(inline_writes, 1);
+
+        AZLogDebug("[{}] Inline write (sparse={}), {} bytes, extent @ [{}, {})",
+                   ino, sparse_write, (extent_right - extent_left),
+                   extent_left, extent_right);
+
+        /*
+         * ensure_flush() will arrange to flush all the dirty data and complete
+         * the write task when the flush completes.
+         */
+        inode->flush_lock();
+        if (inode->is_stable_write()) {
+            inode->get_fcsm()->ensure_flush(offset, length, task);
+        } else {
+            inode->get_fcsm()->ensure_commit(task);
+        }
+        inode->flush_unlock();
+
+        // Free up the fuse thread without completing the application write.
+        return;
+    }
+
+    // Case 2: Commit
+    /*
+     * We don't need to do inline writes. See if we need to commit the
+     * uncommitted data to the backend. We just need to stat the commit
+     * and not hold the current write task till the commit completes.
+     */
+    if (need_commit) {
+        inode->flush_lock();
+        if (inode->is_commit_in_progress()) {
+            AZLogDebug("[{}] Commit already in progress, skipping commit",
+                       ino);
+        } else {
+            AZLogDebug("[{}] Committing {} bytes", ino,
+                       inode->get_filecache()->max_commit_bytes());
+            inode->get_fcsm()->ensure_commit(nullptr);
+        }
+        inode->flush_unlock();
+
+        assert(!need_inline_write);
+    }
+
+    /*
+     * Ok, we don't need to do inline writes. See if we have enough dirty
+     * data and we need to start async flush.
+     */
+
+    // Case 3: Flush
+    if ((extent_right - extent_left) < max_dirty_extent) {
+        /*
+         * This is the case of non-sequential writes causing enough dirty
+         * data to be accumulated, need to flush all of that.
+         */
+        extent_left = 0;
+        extent_right = UINT64_MAX;
+    }
+
+    /*
+     * Queue a non-blocking flush target for flushing all the dirty data.
+     */
+    inode->flush_lock();
+    inode->get_fcsm()->ensure_flush(offset, length, nullptr);
+    inode->flush_unlock();
+
+    /*
+     * Complete the write request without waiting for the backend flush to
+     * complete.
+     */
+    task->reply_write(length);
+}
+
 void fcsm::ctgtq_cleanup()
 {
     assert(inode->is_flushing);
@@ -120,17 +298,15 @@ void fcsm::ctgtq_cleanup()
     assert(ctgtq.empty());
 }
 
-void fcsm::ensure_commit(uint64_t commit_bytes,
-                         struct rpc_task *task)
+void fcsm::ensure_commit(struct rpc_task *task)
 {
-    AZLogDebug("[{}] [FCSM] ensure_commit<{}>({}), task: {}",
+    uint64_t commit_bytes = 0;
+
+    assert(inode->is_flushing == true);
+    AZLogDebug("[{}] [FCSM] ensure_commit<{}> task: {}",
                inode->get_fuse_ino(),
                task ? "blocking" : "non-blocking",
-               commit_bytes,
                fmt::ptr(task));
-    assert(inode->is_flushing == true);
-    // commit_bytes must be non-zero.
-    assert(commit_bytes == 0);
 
     assert(!inode->is_stable_write());
 
@@ -202,7 +378,7 @@ void fcsm::ensure_commit(uint64_t commit_bytes,
                    flushed_seq_num.load(),
                    target_committed_seq_num);
 
-        ensure_flush(0, 0, 0, nullptr);
+        ensure_flush(0, 0, nullptr);
         assert(is_running());
         assert(flushing_seq_num >= target_committed_seq_num);
 
@@ -256,11 +432,12 @@ void fcsm::ensure_commit(uint64_t commit_bytes,
 /**
  * Must be called with flush_lock() held.
  */
-void fcsm::ensure_flush(uint64_t flush_bytes,
-                        uint64_t write_off,
+void fcsm::ensure_flush(uint64_t write_off,
                         uint64_t write_len,
                         struct rpc_task *task)
 {
+    uint64_t flush_bytes = 0;
+
     assert(inode->is_flushing == true);
     AZLogDebug("[{}] [FCSM] ensure_flush<{}>({}), write req [{}, {}], task: {}",
                inode->get_fuse_ino(),
@@ -289,10 +466,6 @@ void fcsm::ensure_flush(uint64_t flush_bytes,
             assert(task->rpc_api->write_task.get_size() == write_len);
             assert((uint64_t) task->rpc_api->write_task.get_offset() ==
                                                                  write_off);
-        } else if (task->get_op_type() == FUSE_FLUSH) {
-            // For flush task, write_len and write_off must be 0.
-            assert(write_len == 0);
-            assert(write_off == 0);
         } else {
             assert(0);
         }
@@ -463,13 +636,6 @@ void fcsm::on_commit_complete(uint64_t commit_bytes)
 
                 tgt.task->reply_write(
                         tgt.task->rpc_api->write_task.get_size());
-            } else if (tgt.task->get_op_type() == FUSE_FLUSH) {
-                AZLogDebug("[{}] [FCSM] completing non-blocking commit target: {}, "
-                           "committed_seq_num: {}",
-                           inode->get_fuse_ino(),
-                           tgt.commit_seq,
-                           committed_seq_num.load());
-                tgt.task->reply_error(inode->get_write_error());
             } else {
                 assert(0);
             }
@@ -652,13 +818,6 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
 
                 tgt.task->reply_write(
                         tgt.task->rpc_api->write_task.get_size());
-            } else if (tgt.task->get_op_type() == FUSE_FLUSH) {
-                AZLogDebug("[{}] [FCSM] completing blocking flush target: {}, "
-                           "flushed_seq_num: {}",
-                           inode->get_fuse_ino(),
-                           tgt.flush_seq,
-                           flushed_seq_num.load());
-                tgt.task->reply_error(inode->get_write_error());
             } else {
                 assert(0);
             }
