@@ -851,10 +851,12 @@ int nfs_inode::wait_for_ongoing_flush(uint64_t start_off, uint64_t end_off)
      * flush_lock. We get the current flushing bcs atomically under flush_lock,
      * and then release the flush_lock while waiting. We repeat the same till
      * there are no flushing bcs. Technically we should not have back to back
-     * flushes started, but to be safe we try 10 times.
+     * flushes started, but to be safe we retry few times.
+     * In debug builds we can induce sleep in the write/flush callback, so we
+     * need to wait enough.
      */
     int retry, err = 0;
-    const int max_retry = 10;
+    const int max_retry = 200;
     for (retry = 0; retry < max_retry; retry++) {
         assert(is_flushing);
 
