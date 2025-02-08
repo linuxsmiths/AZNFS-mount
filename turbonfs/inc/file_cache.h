@@ -311,7 +311,10 @@ struct membuf
         return locked;
     }
 
-    void set_locked();
+    /**
+     * set_locked() returns true if it got the lock w/o having to wait.
+     */
+    bool set_locked();
     void clear_locked();
     bool try_lock();
 
@@ -1247,7 +1250,8 @@ public:
      * Caller will typically flush these to the backing Blob as UNSTABLE
      * writes.
      */
-    std::vector<bytes_chunk> get_contiguous_dirty_bcs(uint64_t *bytes) const;
+    std::vector<bytes_chunk> get_contiguous_dirty_bcs(
+            uint64_t *bytes = nullptr) const;
 
     /*
      * Returns *all* commit pending chunks in chunkmap.
@@ -1267,7 +1271,8 @@ public:
      *       MUST check for that after holding the membuf lock, before it tries
      *       to commit those membuf(s).
      */
-    std::vector<bytes_chunk> get_commit_pending_bcs(uint64_t *bytes) const;
+    std::vector<bytes_chunk> get_commit_pending_bcs(
+            uint64_t *bytes = nullptr) const;
 
     /**
      * Drop cached data in the given range.
@@ -1442,7 +1447,7 @@ public:
          */
         static const uint64_t max_commit_bytes =
             std::min((uint64_t)(max_total * 0.6),
-                    2 * max_dirty_extent_bytes());
+                     2 * max_dirty_extent_bytes());
         assert(max_commit_bytes > 0);
 
         return max_commit_bytes;
@@ -1513,16 +1518,59 @@ public:
     bool do_inline_write() const
     {
         /*
-         * Allow four dirty extents before we force inline write.
-         * This way 2 extents are commit_pending, 1 is dirty. We can issue commit
-         * for the commit_pending extents and accumulate new writes in the dirty.
-         * Before we hit inline limit, 2GB worth of space is freed up. This cycle
-         * should be good enough to keep the cache size in check.
+         * Allow four full-sized dirty extents before we force inline write.
+         * This 4GB dirty data could be sitting in any combination of commit
+         * pending, flushing and dirty. Let's see how the flush, commit and
+         * dirty bytes would play out.
+         *
+         * e.g.,
+         * if the max_dirty_extent_bytes() is 1GB, then we have
+         * flush_required() @ 1GB
+         * commit_required() @ 1GB
+         * do_inline_write() @ 4GB.
+         *
+         * Assuming backend flush speed of 1GB/s and memory write speed of
+         * 5GB/s and typical commit time of ~50ms, we have the following
+         * derived facts:
+         * - flush of 1GB extent will take ~1sec.
+         * - during this time application can dirty 5GB more data, so we
+         *   are likely to hit inline write limit even before the flush
+         *   completed and commit starts. If we consider slightly lesser
+         *   write speeds of say 2GB/s, then by the time the flush completes
+         *   we have dirtied another 2GB. Now flush for the next 1GB extent
+         *   will start and it'll take another 1sec and by this time writes
+         *   can dirty another 2GB, so inline write limit will hit.
+         *
+         * This means,
+         * till [0-1GB] dirty data, we don't trigger any flushing/committing and
+         * of course we don't hold application writes for inline writes.
+         * The first write to hit 1GB dirty data, triggers flushing of the entire
+         * 1GB extent through multiple block sized flushes. The write itself,
+         * and further writes are not blocked.
+         * When the 1GB extent completes flushing, the extent is marked commit
+         * pending and if another 1GB dirty extent is accumulated we start
+         * flushing that extent. If the next 1GB dirty extent is not yet ready,
+         * we do nothing. When the 1GB dirty extent is ready we initiate
+         * flushing and when this completes flushing, we have 2GB commit pending
+         * and hence commit is triggered. No writes are blocked till now, and
+         * they can dirty 2 more 1GB extents.
+         * Commit typically takes around 50ms to complete. For RAM write speed
+         * of say 5GB/s, this would mean application can dirty 250MB more till
+         * the commit completes.
+         * More application writes will cause more dirty data. If the commit
+         * completes, then we have more free space and we don't need writes to
+         * wait inline, else we hit the inline limit and writes are blocked.
          */
-        static const uint64_t max_dirty_allowed_per_cache =
+        static const uint64_t max_dirty_allowed_per_file =
             max_dirty_extent_bytes() * 4;
-        const bool local_pressure = (bytes_dirty + bytes_commit_pending) > max_dirty_allowed_per_cache;
+        const bool local_pressure =
+            (bytes_dirty + bytes_commit_pending) > max_dirty_allowed_per_file;
 
+        /*
+         * TODO: Add counter/stats for counting how many times we forced
+         *       inline write due to local and how many times due to global
+         *       reasons.
+         */
         if (local_pressure) {
             return true;
         }
@@ -1535,60 +1583,6 @@ public:
 
         get_prune_goals(&inline_bytes, nullptr);
         return (inline_bytes > 0);
-    }
-
-    /**
-     * Inline write/flush means that we are under sufficient memory pressure
-     * that we want to slow down the application writes by not completing them
-     * after copying the data to cache (using copy_to_cache()) but instead
-     * complete application writes only after the flush completes.
-     *
-     * This function returns a non-zero number representing the number of bytes
-     * that we need to write inline, else if not under memory pressure returns
-     * zero.
-     */
-    uint64_t get_inline_flush_bytes() const
-    {
-        /*
-         * Allow two dirty extents before we force inline write.
-         * This way one of the extent can be getting flushed and we can populate
-         * the second one.
-         */
-        static const uint64_t max_dirty_allowed_per_cache =
-            (max_dirty_extent_bytes() * 2);
-        const bool local_pressure =
-            ((int64_t) bytes_dirty  > (int64_t) max_dirty_allowed_per_cache);
-
-        if (local_pressure) {
-            /*
-             * Leave one max_dirty_extent_bytes worth of dirty bytes, and
-             * flush the rest.
-             */
-            const int64_t flush_now =
-                (bytes_dirty - max_dirty_extent_bytes());
-            return flush_now;
-        }
-
-        /*
-         * Global pressure is when get_prune_goals() returns non-zero bytes
-         * to be pruned inline.
-         */
-        uint64_t inline_bytes;
-
-        /*
-         * TODO: Noisy neighbor syndrome, where one file is hogging the cache,
-         *       inline pruning will be triggered for other files.
-         */
-        get_prune_goals(&inline_bytes, nullptr);
-
-        /*
-         * (bytes_flushing + bytes_commit_pending) represents the data which
-         * is either already flushed or being flushed. Exclude that from the
-         * needs-to-be-flushed data.
-         */
-        const int64_t flush_now =
-            (inline_bytes - (bytes_flushing + bytes_commit_pending));
-        return std::max((int64_t) 0, flush_now);
     }
 
     /**
