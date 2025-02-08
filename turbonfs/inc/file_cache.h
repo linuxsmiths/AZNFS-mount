@@ -1239,6 +1239,16 @@ public:
     std::vector<bytes_chunk> get_flushing_bc_range(uint64_t st_off,
                                                    uint64_t end_off) const;
 
+    /**
+     * Returns contiguous dirty (and not flushing) chunks from chunmap, starting
+     * with the lowest dirty offset, and returns the total number of (dirty)
+     * bytes contained in the returned chunks.
+     * Before returning it increases the inuse count of underlying membuf(s).
+     * Caller will typically flush these to the backing Blob as UNSTABLE
+     * writes.
+     */
+    std::vector<bytes_chunk> get_contiguous_dirty_bcs(uint64_t *bytes) const;
+
     /*
      * Returns *all* commit pending chunks in chunkmap.
      * Before returning it increases the inuse count of underlying membuf(s)
@@ -1257,7 +1267,7 @@ public:
      *       MUST check for that after holding the membuf lock, before it tries
      *       to commit those membuf(s).
      */
-    std::vector<bytes_chunk> get_commit_pending_bcs() const;
+    std::vector<bytes_chunk> get_commit_pending_bcs(uint64_t *bytes) const;
 
     /**
      * Drop cached data in the given range.
@@ -1341,7 +1351,7 @@ public:
      * We want to send as prompt as possible to utilize the n/w b/w but slow
      * enough to give the write scheduler an opportunity to merge better.
      */
-    uint64_t max_dirty_extent_bytes() const
+    static uint64_t max_dirty_extent_bytes()
     {
         // Maximum cache size allowed in bytes.
         static const uint64_t max_total =
@@ -1408,6 +1418,94 @@ public:
     }
 
     /**
+     * Maximum size of commit_pending data that can be in cache, before we
+     * must commit it to Blob.
+     * It should be greater than or equal to the flush threshold (as returned
+     * by max_dirty_extent_bytes()) and smaller than the inline write threshold
+     * (as suggested by do_inline_write()), to minimize inline flush waits as
+     * much as possible, in steady state.
+     */
+    static uint64_t max_commit_bytes()
+    {
+        // Maximum cache size allowed in bytes.
+        static const uint64_t max_total =
+            (aznfsc_cfg.cache.data.user.max_size_mb * 1024 * 1024ULL);
+        assert(max_total != 0);
+
+        /*
+         * Minimum of 60% of max cache and 2 times the flush limit.
+         * We want to commit as soon as possible w/o affecting performance.
+         * If we commit too often, since commit is a serializing operation,
+         * it'll affect the write throughput, otoh, if we commit too late
+         * then we might hit the inline write threshold, which again would
+         * serialize writes, bringing down throughput.
+         */
+        static const uint64_t max_commit_bytes =
+            std::min((uint64_t)(max_total * 0.6),
+                    2 * max_dirty_extent_bytes());
+        assert(max_commit_bytes > 0);
+
+        return max_commit_bytes;
+    }
+
+    /**
+     * Check if we must initiate a COMMIT RPC now. Note that the caller would
+     * just send the COMMIT RPC and not necessarily block the user write
+     * request till the COMMIT RPC completes, i.e., it's not an inline commit.
+     *
+     * We must start commit if:
+     * 1. We have enough commit_pending data for this file/cache, or,
+     * 2. Global memory pressure dictates that we commit now to free up
+     *    memory. In this case we might be committing more frequently which
+     *    won't necessarily be optimal, but we have no choice due to the
+     *    memory pressure.
+     */
+    bool commit_required() const
+    {
+        const bool local_pressure =
+            (bytes_commit_pending >= max_commit_bytes());
+
+        if (local_pressure) {
+            return true;
+        }
+
+        /*
+         * TODO: Take cue from global memory pressure.
+         */
+        return false;
+    }
+
+    /**
+     * Check if we must initiate flush of some cached data. Note that the caller
+     * would just send the corresponding WRITE RPC and not necessarily block the
+     * user write request till the WRITE RPC completes, i.e., it's not an inline
+     * write.
+     *
+     * We must start flush/write if:
+     * 1. We have enough bytes to flush so that we can write a full sized
+     *    block, or for the case of stable write, we have enough data to fill
+     *    the scheduler queue.
+     * 2. Global memory pressure dictates that we flush now to free up memory.
+     *    In this case we might be flushing more frequently which won't
+     *    necessarily be optimal, but we have no choice due to the memory
+     *    pressure.
+     */
+    bool flush_required() const
+    {
+        const bool local_pressure =
+            (get_bytes_to_flush() >= max_dirty_extent_bytes());
+
+        if (local_pressure) {
+            return true;
+        }
+
+        /*
+         * TODO: Take cue from global memory pressure.
+         */
+        return false;
+    }
+
+    /**
      * This should be called by writer threads to find out if they must wait
      * for the write to complete. This will check both the cache specific and
      * global memory pressure.
@@ -1415,13 +1513,15 @@ public:
     bool do_inline_write() const
     {
         /*
-         * Allow two dirty extents before we force inline write.
-         * This way one of the extent can be getting flushed and we can populate
-         * the second one.
+         * Allow four dirty extents before we force inline write.
+         * This way 2 extents are commit_pending, 1 is dirty. We can issue commit
+         * for the commit_pending extents and accumulate new writes in the dirty.
+         * Before we hit inline limit, 2GB worth of space is freed up. This cycle
+         * should be good enough to keep the cache size in check.
          */
         static const uint64_t max_dirty_allowed_per_cache =
-            max_dirty_extent_bytes() * 2;
-        const bool local_pressure = bytes_dirty > max_dirty_allowed_per_cache;
+            max_dirty_extent_bytes() * 4;
+        const bool local_pressure = (bytes_dirty + bytes_commit_pending) > max_dirty_allowed_per_cache;
 
         if (local_pressure) {
             return true;
@@ -1435,6 +1535,60 @@ public:
 
         get_prune_goals(&inline_bytes, nullptr);
         return (inline_bytes > 0);
+    }
+
+    /**
+     * Inline write/flush means that we are under sufficient memory pressure
+     * that we want to slow down the application writes by not completing them
+     * after copying the data to cache (using copy_to_cache()) but instead
+     * complete application writes only after the flush completes.
+     *
+     * This function returns a non-zero number representing the number of bytes
+     * that we need to write inline, else if not under memory pressure returns
+     * zero.
+     */
+    uint64_t get_inline_flush_bytes() const
+    {
+        /*
+         * Allow two dirty extents before we force inline write.
+         * This way one of the extent can be getting flushed and we can populate
+         * the second one.
+         */
+        static const uint64_t max_dirty_allowed_per_cache =
+            (max_dirty_extent_bytes() * 2);
+        const bool local_pressure =
+            ((int64_t) bytes_dirty  > (int64_t) max_dirty_allowed_per_cache);
+
+        if (local_pressure) {
+            /*
+             * Leave one max_dirty_extent_bytes worth of dirty bytes, and
+             * flush the rest.
+             */
+            const int64_t flush_now =
+                (bytes_dirty - max_dirty_extent_bytes());
+            return flush_now;
+        }
+
+        /*
+         * Global pressure is when get_prune_goals() returns non-zero bytes
+         * to be pruned inline.
+         */
+        uint64_t inline_bytes;
+
+        /*
+         * TODO: Noisy neighbor syndrome, where one file is hogging the cache,
+         *       inline pruning will be triggered for other files.
+         */
+        get_prune_goals(&inline_bytes, nullptr);
+
+        /*
+         * (bytes_flushing + bytes_commit_pending) represents the data which
+         * is either already flushed or being flushed. Exclude that from the
+         * needs-to-be-flushed data.
+         */
+        const int64_t flush_now =
+            (inline_bytes - (bytes_flushing + bytes_commit_pending));
+        return std::max((int64_t) 0, flush_now);
     }
 
     /**
