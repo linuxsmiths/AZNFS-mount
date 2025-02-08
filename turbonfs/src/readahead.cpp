@@ -159,12 +159,11 @@ static void readahead_callback (
          * Note that those prio successful reads would have caused the RPC
          * stats to be updated, but that's fine.
          */
+        bc->get_membuf()->clear_locked();
+        bc->get_membuf()->clear_inuse();
 
         // Release the buffer since we did not fill it.
         read_cache->release(bc->offset, bc->length);
-
-        bc->get_membuf()->clear_locked();
-        bc->get_membuf()->clear_inuse();
 
         AZLogWarn("[{}] <{}> readahead_callback [FAILED] for offset: {} size: {} "
                   "total bytes read till now: {} of {} for [{}, {}) "
@@ -326,9 +325,17 @@ static void readahead_callback (
             res->READ3res_u.resok.eof) {
             assert(res->READ3res_u.resok.count < issued_length);
 
+            /*
+             * We need to clear the inuse count held by this thread, else
+             * release() will not be able to release. We drop and then
+             * promptly grab the inuse count after the release(), so that
+             * set_uptodate() can be called.
+             */
+            bc->get_membuf()->clear_inuse();
             const uint64_t released_bytes =
                 read_cache->release(bc->offset + bc->pvt,
                                     bc->length - bc->pvt);
+            bc->get_membuf()->set_inuse();
 
             /*
              * If we are able to successfully release all the extra bytes
@@ -610,11 +617,11 @@ int ra_state::issue_readaheads()
 
                 on_readahead_complete(bc.offset, bc.length);
 
-                // Release the buffer since we did not fill it.
-                read_cache->release(bc.offset, bc.length);
-
                 bc.get_membuf()->clear_locked();
                 bc.get_membuf()->clear_inuse();
+
+                // Release the buffer since we did not fill it.
+                read_cache->release(bc.offset, bc.length);
 
                 tsk->free_rpc_task();
                 delete ctx;

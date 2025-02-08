@@ -298,8 +298,16 @@ struct membuf
     bool is_locked() const
     {
         const bool locked = (flag & MB_Flag::Locked);
+        /*
+         * XXX Following assert is usually true but for the rare case when
+         *     caller may drop the inuse count while holding the lock for
+         *     release()ing the chunk, this will not hold.
+         *     See read_callback() for such usage.
+         */
+#if 0
         // If locked, must be inuse.
         assert(is_inuse() || !locked);
+#endif
         return locked;
     }
 
@@ -410,9 +418,16 @@ struct membuf
      * right side of the membuf.
      * It'll perform necessary validations and updations needed when a membuf is
      * trimmed.
-     * Caller must own the membuf for trimming it, i.e,. membuf must be locked and
-     * in use. Called from release() and truncate(), release() can trim both from
-     * left and right while truncate_() can only trim from right.
+     * Caller must make sure that this membuf is not being accessed by some other
+     * thread. and trim() can safely update it. This means, trim() can be called
+     * in one of the following cases:
+     * 1. membuf is locked.
+     *    See bytes_chunk_cache::truncate().
+     * 2. chunkmap lock is held and membuf is not inuse.
+     *    See bytes_chunk_cache::scan()->safe_to_release().
+     *
+     * Called from release() and truncate(), release() can trim both from left
+     * and right while truncate() can only trim from right.
      */
     void trim(uint64_t trim_len, bool left);
 
@@ -587,7 +602,7 @@ public:
      * a bytes_chunk from the left and must always match membuf::offset while
      * for non-chunkmap bcs (those returned by get()/getx()) this will be the
      * copy of membuf::offset at the time the bc was created, membuf can be
-     * later trimmed and it's offset may increase.
+     * later trimmed and its offset may increase.
      */
     uint64_t offset = 0;
 
@@ -598,7 +613,7 @@ public:
      * a bytes_chunk from left and right and must always match membuf::length
      * while for non-chunkmap bcs (those returned by get()/getx()) this will be
      * the copy of membuf::length at the time the bc was created, membuf can be
-     * later trimmed and it's length may reduce.
+     * later trimmed and its length may reduce.
      */
     uint64_t length = 0;
 
@@ -751,19 +766,19 @@ public:
      *   maybe it's writing fresh data to it and may mark it dirty. If we
      *   allow such membuf to be released, future readers who get() the cache
      *   will miss those changes.
-     *   We check for inuse==1 as the caller releasing the membuf must be owning
-     *   the membuf and it must be the only one owning it.
      * - commit pending means those membufs are sitting in the TBL of the Blob,
      *   not yet committed, server may fail the commit in which case we might
      *   have to resend those to the server and hence we cannot free those
      *   till successful commit.
+     *
+     * Note: Since we do not allow inuse membufs to be released, it means
+     *       if caller is owning the membuf they must drop their inuse count
+     *       before calling release().
      */
     bool safe_to_release() const
     {
         const struct membuf *mb = get_membuf();
-        return (mb->get_inuse() == 1) &&
-               !mb->is_dirty() &&
-               !mb->is_commit_pending();
+        return !mb->is_inuse() && !mb->is_dirty() && !mb->is_commit_pending();
     }
 
     /**
@@ -1123,10 +1138,8 @@ public:
      * release and cannot mark uptodate.
      *
      * Note: For releasing all chunks and effectively nuking the cache, use
-     *       clear(), but note that clear() also won't release "inuse" chunks.
-     *
-     * Note: You MUST only call release() for membuf that you own, i.e., it's
-     *       inuse and locked by you.
+     *       clear(), but note that clear() also won't release above chunks,
+     *       for which safe_to_release() returns false.
      */
     uint64_t release(uint64_t offset, uint64_t length)
     {
