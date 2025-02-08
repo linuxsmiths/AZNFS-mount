@@ -461,6 +461,13 @@ void nfs_client::jukebox_runner()
                               js->rpc_api->write_task.get_ino());
                     jukebox_write(js->rpc_api);
                     break;
+                case FUSE_FLUSH:
+                    AZLogWarn("[JUKEBOX REISSUE] flush(req={}, ino={})",
+                              fmt::ptr(js->rpc_api->req),
+                              js->rpc_api->flush_task.get_ino());
+                    jukebox_flush(js->rpc_api);
+                    break;
+                /* TODO: Add other request types */
                 /* TODO: Add other request types */
                 default:
                     AZLogError("Unknown jukebox seed type: {}", (int) js->rpc_api->optype);
@@ -1634,6 +1641,39 @@ void nfs_client::jukebox_write(struct api_task_info *rpc_api)
     }
 
     write_task->issue_write_rpc();
+}
+
+/*
+ * This function will be called only to retry the commit requests that failed
+ * with JUKEBOX error.
+ * rpc_api defines the RPC request that need to be retried.
+ */
+void nfs_client::jukebox_flush(struct api_task_info *rpc_api)
+{
+    /*
+     * For commit task pvt has bc_vec, which has copy of byte_chunk vector.
+     * To proceed it should be valid.
+     *
+     * Note: Commit task is always a backend task, 'req' is nullptr.
+     */
+    assert(rpc_api->pvt != nullptr);
+    assert(rpc_api->optype == FUSE_FLUSH);
+    assert(rpc_api->req == nullptr);
+
+    /*
+     * Create a new task to retry the commit request.
+     */
+    struct rpc_task *commit_task =
+        get_rpc_task_helper()->alloc_rpc_task(FUSE_FLUSH);
+    commit_task->init_flush(rpc_api->req /* fuse_req */,
+                            rpc_api->flush_task.get_ino());
+    commit_task->rpc_api->pvt = rpc_api->pvt;
+    rpc_api->pvt = nullptr;
+
+    // Any new task should start fresh as a parent task.
+    assert(commit_task->rpc_api->parent_task == nullptr);
+
+    commit_task->issue_commit_rpc();
 }
 
 /*
