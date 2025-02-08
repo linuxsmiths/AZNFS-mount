@@ -310,7 +310,7 @@ private:
      *   attr.st_size tracks the file size for this view.
      */
     off_t cached_filesize = 0;
-    off_t putblock_filesize = 0;
+    mutable off_t putblock_filesize = 0;
 
     /*
      * Has this inode seen any non-append write?
