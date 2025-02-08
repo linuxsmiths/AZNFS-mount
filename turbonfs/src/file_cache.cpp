@@ -796,6 +796,7 @@ void membuf::set_truncated()
      * Once truncated the corresponding bytes_chunk must be removed from
      * chunkmap, so future users should not get it.
      */
+    assert(is_locked());
     assert(!is_truncated());
 
     /*
@@ -2051,6 +2052,10 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
         if (post) {
             if (mb->try_lock()) {
                 it_vec3.emplace_back(it);
+            } else {
+                AZLogInfo("<Truncate {}> POST failed to lock membuf "
+                          "[{},{})",
+                          trunc_len, bc.offset, bc.offset + bc.length);
             }
         } else {
             mb->set_locked();
@@ -2076,13 +2081,6 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
             assert(bc.offset == mb->offset);
 
             /*
-             * Clear these as we don't want to trim or destroy an inuse membuf.
-             * It's safe as we have the chunkmap lock.
-             */
-            mb->clear_locked();
-            mb->clear_inuse();
-
-            /*
              * it_vec3 should not have any bc that lies completely before
              * trunc_len.
              */
@@ -2094,18 +2092,24 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
                 const uint64_t trim_bytes = (bc.offset + bc.length - trunc_len);
                 assert(trim_bytes > 0);
 
-                AZLogVerbose("<Truncate {}> (trimming chunk from right) "
+                AZLogVerbose("<Truncate {}> {}trimming chunk from right "
                              "[{},{}) -> [{},{})",
-                             trunc_len,
-                             bc->offset, bc->offset + bc->length,
-                             bc->offset, trunc_len);
+                             trunc_len, post ? "POST " : "",
+                             bc.offset, bc.offset + bc.length,
+                             bc.offset, trunc_len);
 
                 // Trim chunkmap bc.
                 bc.length -= trim_bytes;
                 assert((int64_t) bc.length > 0);
 
-                // Trim membuf.
+                /*
+                 * Trim membuf.
+                 * trim() expects inuse to be dropped before calling.
+                 * We have the membuf lock, so we are fine.
+                 */
+                mb->clear_inuse();
                 mb->trim(trim_bytes, false /* left */);
+                mb->set_inuse();
 
                 assert(bytes_cached >= trim_bytes);
                 assert(bytes_cached_g >= trim_bytes);
@@ -2113,7 +2117,14 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
                 bytes_cached_g -= trim_bytes;
 
                 bytes_truncated += trim_bytes;
+
+                mb->clear_locked();
+                mb->clear_inuse();
             } else {
+                AZLogVerbose("<Truncate {}> {}truncated full chunk [{},{})",
+                             trunc_len, post ? "POST " : "",
+                             bc.offset, bc.offset + bc.length);
+
                 /*
                  * Release the chunk.
                  * This will release the membuf (munmap() it in case of file-backed
@@ -2133,6 +2144,9 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
 
                 mb->set_truncated();
 
+                mb->clear_locked();
+                mb->clear_inuse();
+
                 chunkmap.erase(it);
             }
         }
@@ -2148,7 +2162,6 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
 
     return bytes_truncated;
 }
-
 
 /*
  * TODO: Add pruning stats.

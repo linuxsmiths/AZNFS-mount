@@ -520,9 +520,15 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
          *       set_locked() call won't wait for write to complete.
          *       This is ensured because we only come here for membufs that are
          *       currently not flushing and hence cannot be waiting for a write.
+         *
+         * Note: bytes_chunk_cache::truncate() can truncate a membuf after we
+         *       get the list of dirty membufs and before we could get the lock
+         *       here, skip those.
          */
         mb->set_locked();
-        if (mb->is_flushing() || !mb->is_dirty()) {
+        if (mb->is_flushing() ||
+            !mb->is_dirty() ||
+            mb->is_truncated()) {
             mb->clear_locked();
             mb->clear_inuse();
 
