@@ -1343,7 +1343,14 @@ int nfs_inode::flush_cache_and_wait()
            is_stable_write());
     assert(!is_commit_in_progress());
 
-    if (get_filecache()->get_bytes_to_flush() == 0) {
+    /*
+     * For stable case we didn't wait for ongoing flush to complete.
+     * And, it may be last flush initiated to BLOB, we need to wait
+     * for this flush to complete. Application not writing anymore
+     * get_bytes_to_flush() can return 0.
+     */
+    if (!get_filecache()->is_flushing_in_progress() &&
+        get_filecache()->get_bytes_to_flush() == 0) {
         assert(get_filecache()->bytes_dirty == 0);
         assert(get_filecache()->bytes_flushing == 0);
 
