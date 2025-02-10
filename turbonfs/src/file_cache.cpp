@@ -601,7 +601,8 @@ void membuf::clear_flushing()
     bcc->bytes_flushing_g -= length;
 
     AZLogDebug("Clear flushing membuf [{}, {}), fd={}",
-               offset.load(), offset.load()+length.load(), backing_file_fd);
+               offset.load(), offset.load()+length.load(),
+               backing_file_fd);
 }
 
 /**
@@ -921,6 +922,14 @@ bytes_chunk::bytes_chunk(bytes_chunk_cache *_bcc,
      */
     load();
     assert(get_buffer() != nullptr);
+}
+
+/**
+ * Get the inode corresponding to this bc.
+ */
+struct nfs_inode *bytes_chunk::get_inode() const
+{
+    return bcc->get_inode();
 }
 
 bytes_chunk_cache::bytes_chunk_cache(struct nfs_inode *_inode,

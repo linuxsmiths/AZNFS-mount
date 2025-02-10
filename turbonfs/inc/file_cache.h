@@ -695,6 +695,11 @@ public:
     bool is_new = false;
 
     /**
+     * Get the inode corresponding to this bc.
+     */
+    struct nfs_inode *get_inode() const;
+
+    /**
      * Return membuf corresponding to this bytes_chunk.
      * This will be used by caller to synchronize operations on the membuf.
      * See membuf::flag and various operations that can be done on them.
@@ -1200,8 +1205,8 @@ public:
      *       check for that after holding the membuf lock, before it tries to
      *       flush those membuf(s).
      */
-    std::vector<bytes_chunk> get_dirty_bc_range(uint64_t st_off,
-                                                uint64_t end_off) const;
+    std::vector<bytes_chunk> get_dirty_bc_range(
+            uint64_t st_off = 0, uint64_t end_off = UINT64_MAX) const;
 
     /*
      * Returns dirty chunks which are not already flushing, in the given range,
@@ -1239,8 +1244,8 @@ public:
      *       check for that after holding the membuf lock, before it tries to
      *       commit those membuf(s).
      */
-    std::vector<bytes_chunk> get_flushing_bc_range(uint64_t st_off,
-                                                   uint64_t end_off) const;
+    std::vector<bytes_chunk> get_flushing_bc_range(
+            uint64_t st_off = 0, uint64_t end_off = UINT64_MAX) const;
 
     /**
      * Returns contiguous dirty (and not flushing) chunks from chunmap, starting
@@ -1526,7 +1531,7 @@ public:
          * e.g.,
          * if the max_dirty_extent_bytes() is 1GB, then we have
          * flush_required() @ 1GB
-         * commit_required() @ 1GB
+         * commit_required() @ 2GB
          * do_inline_write() @ 4GB.
          *
          * Assuming backend flush speed of 1GB/s and memory write speed of
