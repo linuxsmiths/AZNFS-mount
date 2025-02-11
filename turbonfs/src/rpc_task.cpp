@@ -178,6 +178,13 @@ std::atomic<int> rpc_task::async_slots = MAX_ASYNC_RPC_TASKS;
 /* static */
 const std::string rpc_task::fuse_opcode_to_string(fuse_opcode opcode)
 {
+    /*
+     * We use FUSE_FLUSH to indicate COMMIT RPC.
+     */
+    if (opcode == FUSE_FLUSH) {
+        return "COMMIT";
+    }
+
 #define _case(op)   \
     case FUSE_##op: \
         return #op;

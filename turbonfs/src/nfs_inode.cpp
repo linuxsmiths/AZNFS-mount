@@ -448,6 +448,18 @@ void nfs_inode::switch_to_stable_write()
      * inode state to "doing stable writes".
      */
     if (get_filecache()->get_bytes_to_commit() == 0) {
+        /*
+         * Make sure get_bytes_to_commit() and get_commit_pending_bcs() agree.
+         */
+#ifdef ENABLE_PARANOID
+        {
+            uint64_t bytes;
+            std::vector<bytes_chunk> bc_vec =
+                get_filecache()->get_commit_pending_bcs(&bytes);
+            assert(bc_vec.empty());
+            assert(bytes == 0);
+        }
+#endif
         AZLogDebug("[{}] Nothing to commit, switching to stable write", ino);
 
         set_stable_write();
@@ -475,6 +487,9 @@ void nfs_inode::switch_to_stable_write()
      * too, we have a risk that it may block the only libnfs thread and
      * everything will stall. To avoid this, let's not try to commit, but
      * instead make all the commit_pending data back to dirty.
+     * This will caus all that data to be re-send to the server (this time
+     * as stable writes) but since this is an infrequent operation, it
+     * should be ok.
      */
     for (bytes_chunk& bc : bc_vec) {
         [[maybe_unused]] struct membuf *mb = bc.get_membuf();
@@ -486,7 +501,7 @@ void nfs_inode::switch_to_stable_write()
         assert(!mb->is_dirty());
 
         /*
-         * Clear the commit_pending bit, now these are rewritten
+         * Clear the commit_pending bit, now these will be rewritten
          * as stable writes.
          */
         mb->clear_commit_pending();
@@ -501,7 +516,8 @@ void nfs_inode::switch_to_stable_write()
 
     set_stable_write();
 
-    putblock_filesize = 0;
+    // Only unstable writes use putblock_filesize.
+    putblock_filesize = AZNFSC_BAD_OFFSET;
 
     /*
      * Now we moved to stable write, cleanup the commit target queue.
@@ -556,10 +572,10 @@ void nfs_inode::commit_membufs(std::vector<bytes_chunk>& bc_vec)
     assert(is_flushing);
 
     /*
-     * Commit is only called by FCSM, either callback of completion
-     * or inline as part of ensure_commit.
+     * Commit is only called by FCSM, either callback of completion or from
+     * ensure_commit(). When called from ensure_commit() FCSM is not yet running.
      */
-    assert(get_fcsm()->is_running() || !get_fcsm()->fc_cb_count());
+    assert(get_fcsm()->is_running() || (get_fcsm()->fc_cb_count() == 0));
 
     set_commit_in_progress();
 
@@ -1280,41 +1296,22 @@ int nfs_inode::wait_for_ongoing_flush()
 
 /**
  * flush_cache_and_wait() is called only from the release/flush call.
- * It's called with flush_lock() held.
- * Things it does:
- * - Before flushing it needs to wait for any ongoing commit to complete.
- * - First it try to get membufs through get_contiguous_dirty_bcs() or
- *   get_dirty_bc_range() based on the unstable write or stable write.
- * - Issue flush for the dirty membufs and wait for the flush to complete.
- * - If it's unstable write, it issue commit for commit pending membufs.
- * - Wait for the commit to complete.
- * - Returns the error code if any.
+ * It flushes and commits (only for unstable writes) *all* dirty data at
+ * the point when it's called. Any new dirty data added after the call is
+ * made is not guaranteed to be flushed/committed. If caller need *all*
+ * dirty data to be flushed/committed, it must ensure through other means
+ * that no new data is dirtied while flush_cache_and_wait() is running.
  *
- * Note: Flush_cache_and_wait() blocks the fuse thread till the flush completes.
- *       It's called from the release(), flush() and getattr() calls. It's ok
- *       as of now as it's not very often called. We can optimize to complete
- *       the flush in background and return immediately. For that we need to add
- *       special handling for the getattr() call.
+ * Note: Flush_cache_and_wait() blocks the fuse thread till the flush/commit
+ *       completes. It's called from the release(), flush() and getattr() calls.
+ *       It's ok as of now as it's not cslled very often. We can optimize to
+ *       complete the flush in background and return immediately. For that we
+ *       need to add special handling for the getattr() call.
+ *
+ * LOCKS: Holds flush_lock.
  */
 int nfs_inode::flush_cache_and_wait()
 {
-    /*
-     * If flush() is called w/o open(), there won't be any cache, skip.
-     */
-    if (!has_filecache()) {
-        return 0;
-    }
-
-    /*
-     * TODO: Let's use ensure_flush()/ensure_commit() here so perform the
-     *       flush+commit using the FCSM. It can convey pointer to an atomic
-     *       boolean which the callback can set and it can wait here.
-     */
-    if (is_stable_write()) {
-        assert(get_filecache()->bytes_commit_pending == 0);
-        assert(!is_commit_in_progress());
-    }
-
     /*
      * MUST be called only for regular files.
      * Leave the assert to catch if fuse ever calls flush() on non-reg files.
@@ -1322,6 +1319,18 @@ int nfs_inode::flush_cache_and_wait()
     if (!is_regfile()) {
         assert(0);
         return 0;
+    }
+
+    /*
+     * If flush() is called w/o open(), there won't be any cache, skip.
+     */
+    if (!has_filecache()) {
+        return 0;
+    }
+
+    if (is_stable_write()) {
+        assert(get_filecache()->bytes_commit_pending == 0);
+        assert(!is_commit_in_progress());
     }
 
     /*
@@ -1337,38 +1346,47 @@ int nfs_inode::flush_cache_and_wait()
     }
 
     /*
-     * Grab the flush_lock to ensure that we don't initiate any new flushes
-     * while some truncate call is in progress (which must have taken the
-     * flush_lock). Once flush_lock() returns we have the lock and we are
-     * guaranteed that no new truncate operation can start till we release
-     * the flush_lock. We can safely start the flush then.
+     * Grab the flush_lock to ensure no new flushes are initiated, and wait
+     * for the ongoing ones.
      */
     flush_lock();
 
-
     /*
-     * Wait for ongoing flush/commit to complete, so that
-     * ensure_flush() able to get right dirty_bytes, as
-     * bytes_flushing = 0, and nobody changes those values.
+     * Wait for ongoing flush/commit to complete, so that ensure_flush() is
+     * able to get correct dirty_bytes that doesn't change. This is because
+     * wait_for_ongoing_flush() will ensure bytes_flushing == 0, and it won't
+     * be changed since we hold the flush_lock.
+     *
+     * Note: Technically bytes_dirty can increase but callers of
+     *       flush_cache_and_wait() must ensure through other means that while
+     *       we are waiting here, no new data will be dirtied.
+     *       If it's dirtied, then we won't wait for any newly dirtied data.
      */
     wait_for_ongoing_flush();
+
     std::atomic_bool complete = false;
 
     /*
-     * Set the flush target for both stable/unstable write.
-     * ensure_commit() doesn't set target for whole unflushed
-     * bytes.
+     * Make sure *all* dirty data is flushed and committed (only needed for
+     * unstable writes).
+     * ensure_flush() by default flushes *all* dirty bytes, while
+     * ensure_commit() is asked to flush+commit *all* dirty bytes via the
+     * commit_full parameter.
+     *
+     * Any data dirtied after the following ensure calls take stock of
+     * dirty data, won't be flushed/committed.
      */
     if (is_stable_write()) {
         get_fcsm()->ensure_flush(0, 0, nullptr, &complete);
     } else {
-        get_fcsm()->ensure_commit(0, 0, nullptr, &complete, true);
+        get_fcsm()->ensure_commit(0, 0, nullptr, &complete, true /* commit_full */);
     }
+
     flush_unlock();
 
     // Wait for flush to complete.
     int iter = 0;
-    while (complete != true) {
+    while (!complete) {
         if (++iter % 1000 == 0) {
             AZLogWarn("[{}] flush_cache_and_wait() waiting for ongoing"
                       " flush to complete still waiting, iter: {}",

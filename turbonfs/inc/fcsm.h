@@ -69,8 +69,8 @@ public:
          struct nfs_inode *_inode);
 
     /**
-     * Ensure all or some dirty bytes are flushed or scheduled for flushing (if
-     * a flush or commit is already ongoing).
+     * Ensure *all* dirty bytes are flushed or scheduled for flushing (if flush
+     * or commit is already ongoing).
      * If the state machine is currently not running, it'll kick off the state
      * machine by calling sync_membufs(), else it'll add a new flush target to
      * ftgtq, which will be run by on_flush_complete() when the ongoing flush
@@ -81,10 +81,12 @@ public:
      * dirty bytes to be flushed w/o having the application wait.
      *
      * ensure_flush() provides the following guarantees:
-     * - It'll flush all or part of cached dirty bytes starting from the lowest
-     *   offset. The actual number of bytes flushed is decided based on various
-     *   config settings and the memory pressure.
-     * - On completion of that flush, task will be completed.
+     * - It'll flush *all* cached dirty bytes starting from the lowest offset.
+     * - On completion of that flush:
+     *   - If 'task' is non-null, it will be completed.
+     *   - If 'done' is non-null, it will be set to true to signal completion.
+     *     Caller must wait for that in a loop.
+     *   Only one of 'task' and 'done' can be non-null.
      *
      * write_off and write_len describe the current application write call.
      * They are needed for logging when task is nullptr.
@@ -94,21 +96,28 @@ public:
     void ensure_flush(uint64_t write_off,
                       uint64_t write_len,
                       struct rpc_task *task = nullptr,
-                      std::atomic<bool> *conditional_variable = nullptr);
+                      std::atomic<bool> *done = nullptr);
 
     /**
      * Ensure all or some commit-pending bytes are committed or scheduled for
-     * commit (if a flush or commit is already ongoing).
+     * commit (if a flush or commit is already ongoing). If not already flushed
+     * data will be flushed before committing. Caller can pass 'commit_full' as
+     * true to convey flush/commit *all dirty data*, else ensure_commit() will
+     * decide how much to flush/commit based on heurustics and configuration.
      * If 'task' is null it'll add a non-blocking commit target to ctgtq, else
      * it'll add a blocking commit target for completing task when given commit
-     * goal is met.
+     * goal is met. The goal is decided by ensure_commit() based on configured
+     * limits or if 'commit_full' is true it means caller wants entire dirty
+     * data to be flushed and committed.
      *
      * Caller MUST hold the flush_lock.
+     *
+     * See ensure_flush() for more details.
      */
     void ensure_commit(uint64_t write_off,
                        uint64_t write_len,
                        struct rpc_task *task = nullptr,
-                       std::atomic<bool> *conditional_variable = nullptr,
+                       std::atomic<bool> *done = nullptr,
                        bool commit_full = false);
 
     /**
@@ -252,7 +261,7 @@ private:
               uint64_t _flush_seq,
               uint64_t _commit_seq,
               struct rpc_task *_task = nullptr,
-              std::atomic<bool> *conditional_variable = nullptr);
+              std::atomic<bool> *_done = nullptr);
 
         /*
          * Flush and commit targets (in terms of flushed_seq_num/committed_seq_num)
@@ -268,15 +277,16 @@ private:
         struct rpc_task *const task = nullptr;
 
         /*
+         * If non-null, it's initial value must be false, and will be set to
+         * true when the target completes. Caller will typically wait for it
+         * to become true, in a loop.
+         */
+        std::atomic<bool> *done = nullptr;
+
+        /*
          * Pointer to the containing fcsm.
          */
         struct fcsm *const fcsm = nullptr;
-
-        /*
-         * If non-null, it's initial value is false.
-         * Caller who enqueue the target waiting for it to be true.
-         */
-        std::atomic<bool> *conditional_variable = nullptr;
 #if 0
         /*
          * Has the required flush/commit task started?
