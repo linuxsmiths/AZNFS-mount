@@ -309,7 +309,7 @@ private:
      *   Other clients will see this view.
      *   attr.st_size tracks the file size for this view.
      */
-    off_t cached_filesize = 0;
+    mutable off_t cached_filesize = 0;
     mutable off_t putblock_filesize = 0;
 
     /*
@@ -597,6 +597,11 @@ public:
         assert(!filecache_alloced || filecache_handle);
 
         return filecache_alloced;
+    }
+
+    off_t get_cached_filesize() const
+    {
+        return cached_filesize;
     }
 
     /**
@@ -1055,14 +1060,14 @@ public:
          *       updated from postop attributes. We will need to correctly
          *       update that when file is truncated f.e.
          */
-        if (!non_append_writes_seen && (offset != attr.st_size)) {
+        if (!non_append_writes_seen && (offset != cached_filesize)) {
             non_append_writes_seen = true;
             AZLogInfo("[{}] Non-append write seen [{}, {}), file size: {}",
-                      ino, offset, offset+length, attr.st_size);
+                      ino, offset, offset+length, cached_filesize);
         }
 
-        if (new_size > attr.st_size) {
-            attr.st_size = new_size;
+        if (new_size > cached_filesize) {
+            cached_filesize = new_size;
         }
     }
 

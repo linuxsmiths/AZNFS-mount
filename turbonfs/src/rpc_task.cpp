@@ -3277,8 +3277,14 @@ void rpc_task::run_read()
      */
     if (aznfsc_cfg.consistency_solowriter) {
         const int64_t file_size = inode->get_file_size();
+        /*
+         * check whether offset greater than on cached filesize.
+         */
+        const bool eof = rpc_api->read_task.get_offset() >
+                    inode->get_cached_filesize();
+
         if ((file_size != -1) &&
-            (rpc_api->read_task.get_offset() >= file_size)) {
+            (rpc_api->read_task.get_offset() >= file_size) && eof) {
             AZLogDebug("[{}] Read returning 0 bytes (eof) as requested "
                        "offset ({}) >= file size ({})",
                        ino, rpc_api->read_task.get_offset(), file_size);
@@ -3344,6 +3350,21 @@ void rpc_task::run_read()
 
     num_ongoing_backend_reads = 1;
 
+    /*
+     * In case of unstable writes, following are the rules:-
+     * 1. offset > cached_filesize then returns eof.
+     * 2. offset + length > attr.size and offset + length < cached_filesize,
+     *    then membuf present in cache, read should be served from there.
+     * 3. offset < attr.size then it should serve from BLOB.
+     *
+     * In case of stable writes, following are the rules:-
+     * 1. offset > cached_filesize then returns eof.
+     * 2. offset > attr.size and offset < cached_filesize, then if membuf
+     *    present, then read should be served from there, otherwise return
+     *    zero buffer.
+     * 3. offset < attr.size then it should serve from BLOB.
+     *
+     */
     for (size_t i = 0; i < bc_vec.size(); i++) {
         /*
          * Every bytes_chunk returned by get() must have its inuse count
@@ -3368,6 +3389,16 @@ void rpc_task::run_read()
         }
 
         if (!bc_vec[i].get_membuf()->is_uptodate()) {
+            bool serve_from_cache = false;
+            if (((bc_vec[i].offset + bc_vec[i].length) <=
+                 (uint64_t) inode->get_cached_filesize()) &&
+                (bc_vec[i].offset >=(uint64_t) inode->get_file_size(true))) {
+                AZLogInfo("BC[{}, {}] lie between cached_filesize {},"
+                    " server-size {}, serve from cache", bc_vec[i].offset,
+                    bc_vec[i].offset+bc_vec[i].length,
+                    inode->get_cached_filesize(), inode->get_file_size(true));
+                serve_from_cache = true;
+            }
             /*
              * Now we are going to call read_from_server() which will issue
              * an NFS read that will read the data from the NFS server and
@@ -3380,7 +3411,16 @@ void rpc_task::run_read()
             bc_vec[i].get_membuf()->set_locked();
 
             // Check if the buffer got updated by the time we got the lock.
-            if (bc_vec[i].get_membuf()->is_uptodate()) {
+            if (serve_from_cache) {
+                // Not uptodate membuf.
+                if (!bc_vec[i].get_membuf()->is_uptodate()) {
+                    assert(inode->is_stable_write());
+                    assert(bc_vec[i].maps_full_membuf());
+
+                    ::memset(bc_vec[i].get_buffer(), 0, bc_vec[i].length);
+                    bc_vec[i].get_membuf()->set_uptodate();
+                }
+
                 /*
                  * Release the lock since we no longer intend on writing
                  * to this buffer.
