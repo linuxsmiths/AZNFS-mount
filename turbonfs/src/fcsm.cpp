@@ -493,9 +493,8 @@ void fcsm::ensure_commit(uint64_t write_off,
          * once all data os flushed and committed.
          */
         ensure_flush(task ? task->rpc_api->write_task.get_offset() : 0,
-                     task ? task->rpc_api->write_task.get_size() : 0,
-                     nullptr,
-                     inode->is_stable_write() ? done : nullptr);
+                     task ? task->rpc_api->write_task.get_size() : 0);
+
         /*
          * ensure_flush() flushes *all* dirty data, so it must have scheduled
          * flushing till target_committed_seq_num.
@@ -521,6 +520,11 @@ void fcsm::ensure_commit(uint64_t write_off,
                 assert(!commit_full);
                 assert(!done);
                 task->reply_write(task->rpc_api->write_task.get_size());
+            } else if (done) {
+                assert(commit_full);
+                assert(*done == false);
+
+                ensure_flush(0, 0, nullptr, done);
             }
         }
 
