@@ -487,10 +487,10 @@ void fcsm::ensure_commit(uint64_t write_off,
                    inode->is_stable_write());
 
         /*
-         * ensure_flush()->sync_membufs() might have converted this inode to
-         * stable writes. In that case we should let caller know of completion
-         * once all dirty data is flushed, else we want to let caller know
-         * once all data os flushed and committed.
+         * ensure_flush()->sync_membufs() below may convert this inode to stable
+         * writes. In that case we should let caller know of completion once all
+         * dirty data is flushed, else we want to let caller know once all data
+         * is flushed and committed.
          */
         ensure_flush(task ? task->rpc_api->write_task.get_offset() : 0,
                      task ? task->rpc_api->write_task.get_size() : 0);
