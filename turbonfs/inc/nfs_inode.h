@@ -330,10 +330,10 @@ private:
      * (since server knows best how to allocate blocks for them).
      * Once set to true, it remains true for the life of the inode.
      * 
-     * Note: As of now, we are not using this flag as commit changes not yet
-     *       integrated, so we are setting this flag to true.
+     * TODO: Set this to false once we have servers with unstable write
+     *       support. Also uncomment the assert in nfs_inode constructor.
      */
-    bool stable_write = false;
+    bool stable_write = true;
 
 public:
     /*
@@ -1658,6 +1658,9 @@ public:
     {
         assert(!stable_write);
         stable_write = true;
+
+        // Only unstable writes use putblock_filesize.
+        putblock_filesize = AZNFSC_BAD_OFFSET;
     }
 
     /**

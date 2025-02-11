@@ -34,8 +34,17 @@ nfs_inode::nfs_inode(const struct nfs_fh3 *filehandle,
     assert(write_error == 0);
 
     // We start doing unstable writes until proven o/w.
+#if 0
     assert(stable_write == false);
+#endif
     assert(commit_state == commit_state_t::COMMIT_NOT_NEEDED);
+
+    // Initial putblock_filesize value for stable and unstable writes.
+    if (stable_write) {
+        putblock_filesize = AZNFSC_BAD_OFFSET;
+    } else {
+        putblock_filesize = 0;
+    }
 
 #ifndef ENABLE_NON_AZURE_NFS
     // Blob NFS supports only these file types.
@@ -516,9 +525,6 @@ void nfs_inode::switch_to_stable_write()
 
     set_stable_write();
 
-    // Only unstable writes use putblock_filesize.
-    putblock_filesize = AZNFSC_BAD_OFFSET;
-
     /*
      * Now we moved to stable write, cleanup the commit target queue.
      */
@@ -543,6 +549,8 @@ bool nfs_inode::check_stable_write_required(off_t offset)
     if (is_stable_write()) {
         return false;
     }
+
+    assert(putblock_filesize != (off_t) AZNFSC_BAD_OFFSET);
 
     /*
      * If current write is not append write, then we can't go for unstable writes
@@ -826,7 +834,7 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
             if (!is_stable_write()) {
                 putblock_filesize += bc.length;
             } else {
-                assert(putblock_filesize == 0);
+                assert(putblock_filesize == (off_t) AZNFSC_BAD_OFFSET);
             }
             continue;
         } else {
@@ -857,7 +865,7 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
             if (!is_stable_write()) {
                 putblock_filesize += bc.length;
             } else {
-                assert(putblock_filesize == 0);
+                assert(putblock_filesize == (off_t) AZNFSC_BAD_OFFSET);
             }
         }
     }
@@ -1456,11 +1464,16 @@ void nfs_inode::truncate_end(size_t size) const
     /*
      * Update the in cache putblock_filesize to reflect the new size.
      */
-    putblock_filesize = size;
+    if (!is_stable_write()) {
+        putblock_filesize = size;
+    } else {
+        assert(putblock_filesize == (off_t) AZNFSC_BAD_OFFSET);
+    }
 
     AZLogDebug("[{}] <truncate_end> Filecache truncated to size={} "
-               "(bytes truncated: {})",
-               ino, size, bytes_truncated);
+               "(bytes truncated: {}){}",
+               ino, size, bytes_truncated,
+               is_stable_write() ? " STABLE" : " UNSTABLE");
 
     flush_unlock();
 }
