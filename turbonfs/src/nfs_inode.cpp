@@ -1449,7 +1449,7 @@ void nfs_inode::flush_unlock() const
     flush_cv.notify_one();
 }
 
-void nfs_inode::truncate_end(size_t size) const
+void nfs_inode::truncate_end(size_t size)
 {
     AZLogDebug("[{}] truncate_end() called", ino);
 

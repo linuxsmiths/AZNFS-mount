@@ -298,6 +298,8 @@ private:
      *   have been flushed and/or committed. This is the most uptodate view of
      *   the file and applications must use this view.
      *   cached_filesize tracks the file size for this view.
+     *   When cache is invalidated (in response to postop attributes received
+     *   that suggest file data has changed), cached_filesize is reset to 0.
      * - Uncommited.
      *   This is the view of the file that tracks data that has been flushed
      *   using UNSTABLE writes but not yet COMMITted to the Blob. This view of
@@ -309,8 +311,8 @@ private:
      *   Other clients will see this view.
      *   attr.st_size tracks the file size for this view.
      */
-    mutable off_t cached_filesize = 0;
-    mutable off_t putblock_filesize = 0;
+    off_t cached_filesize = 0;
+    off_t putblock_filesize = 0;
 
     /*
      * Has this inode seen any non-append write?
@@ -556,7 +558,7 @@ public:
      * change the file size after truncate sets it.
      */
     bool truncate_start(size_t size);
-    void truncate_end(size_t size) const;
+    void truncate_end(size_t size);
 
     /**
      * This MUST be called only after has_filecache() returns true, else
@@ -597,11 +599,6 @@ public:
         assert(!filecache_alloced || filecache_handle);
 
         return filecache_alloced;
-    }
-
-    off_t get_cached_filesize() const
-    {
-        return cached_filesize;
     }
 
     /**
@@ -1007,6 +1004,11 @@ public:
         const bool attr_expired = (attr_timeout_timestamp < now_msecs);
 
         return attr_expired;
+    }
+
+    off_t get_cached_filesize() const
+    {
+        return cached_filesize;
     }
 
     /**
