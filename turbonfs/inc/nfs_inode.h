@@ -1008,20 +1008,25 @@ public:
 
     off_t get_cached_filesize() const
     {
+        assert(cached_filesize >= 0);
+        assert(cached_filesize <= (off_t) AZNFSC_MAX_FILE_SIZE);
         return cached_filesize;
     }
 
     /**
-     * Get the estimated file size based on the cached attributes. Note that
-     * this is based on cached attributes which might be old and hence the
-     * size may not match the recent size, caller should use this just as an
-     * estimate and should not use it for any hard failures that may be in
-     * violation of the protocol.
+     * Get the estimated file size on the server. Note that this is based on
+     * cached attributes hence the returned size is at best an estimate and may
+     * not exactly match the most recent file size on the server. Callers are
+     * warned about that and they should not use it for any hard failures that
+     * may be in violation of the protocol.
      * If cached attributes have expired (as per the configured actimeo) then
      * it returns -1 and caller must handle it, unless caller does not care
      * and passed dont_check_expiry as true.
+     *
+     * Note: Use get_file_sizes() if you need both server and client file
+     *       sizes.
      */
-    int64_t get_file_size(const bool dont_check_expiry = false) const
+    int64_t get_server_file_size(const bool dont_check_expiry = false) const
     {
         /*
          * XXX We access attr.st_size w/o holding ilock_1 as aligned access
@@ -1038,10 +1043,66 @@ public:
     }
 
     /**
+     * Get client's most recent estimate of the file size.
+     * Note that unlike get_server_file_size() which estimates the file size
+     * strictly as present on the server, this is a size estimate that matters
+     * from the client applications' pov. It considers the cached_filesize
+     * also and returns the max of the server file size and cached_filesize.
+     * Note that cached_filesize corresponds to data which has not yet been
+     * synced with the server, so won't be reflected in the server file size,
+     * but reader applications would be interested in cached data too.
+     *
+     * Returns -1 to indicate that we do not have a good estimate of the file
+     * size. Since we always know the cached_filesize for sure, this happens
+     * when we do not know the recent server file size (within the last
+     * attributes cache timeout period).
+     *
+     * Note: Use get_file_sizes() if you need both server and client file
+     *       sizes.
+     */
+    int64_t get_client_file_size() const
+    {
+        const int64_t sfsize = get_server_file_size();
+
+        if (sfsize == -1) {
+            /*
+             * We don't know server size, so we cannot estimate
+             * effective client file size for sure.
+             */
+            return -1;
+        }
+
+        return std::max(sfsize, get_cached_filesize());
+    }
+
+    /**
+     * Get both server and client file sizes.
+     * Use this when you need to know both server and client file sizes
+     * atomically, i.e., it will either return -1 for both client and server
+     * file sizes or it'll return valid value for both.
+     */
+    void get_file_sizes(int64_t& cfsize, int64_t& sfsize) const
+    {
+        sfsize = get_server_file_size();
+
+        if (sfsize == -1) {
+            cfsize = -1;
+            // We don't know either.
+            assert((cfsize == -1) && (sfsize == -1));
+            return;
+        }
+
+        cfsize = std::max(sfsize, get_cached_filesize());
+
+        // We know both.
+        assert((cfsize != -1) && (sfsize != -1));
+    }
+
+    /**
      * This must be called from copy_to_cache() whenever we successfully copy
-     * some data to filecache. If it copies data beyond eof causing file size
-     * to change, on_cached_write() updates the file size in attr.size so that
-     * get_file_size() returns the correct size.
+     * some data to filecache. If it copies data beyond cached_filesize, we
+     * must update cached_filesize so that it holds the correct cached file
+     * size.
      *
      * Note: It doesn't update attr.ctime and attr.mtime deliberately as this
      *       is not authoritative info and we would want to fetch attributes
@@ -1068,9 +1129,8 @@ public:
                       ino, offset, offset+length, cached_filesize);
         }
 
-        if (new_size > cached_filesize) {
-            cached_filesize = new_size;
-        }
+        // Highest byte offset written is the cached_filesize.
+        cached_filesize = std::max(new_size, cached_filesize);
     }
 
     /**

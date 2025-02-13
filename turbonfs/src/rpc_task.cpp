@@ -3248,6 +3248,7 @@ void rpc_task::run_read()
 {
     const fuse_ino_t ino = rpc_api->read_task.get_ino();
     struct nfs_inode *inode = get_client()->get_nfs_inode_from_ino(ino);
+    int64_t cfsize, sfsize;
 
     // run_read() must be called only for an fe task.
     assert(rpc_api->read_task.is_fe());
@@ -3270,26 +3271,52 @@ void rpc_task::run_read()
     assert(rpc_api->parent_task == nullptr);
 
     /*
-     * In solowriter mode we know the file size definitively.
-     * This is an optimization that saves an extra READ call to the server.
-     * The server will correctly return 0+eof for this READ call so we are
-     * functionally correct in other consistency modes too.
+     * Get server and effective file size estimates.
+     * We use these to find holes that we should zero fill.
      */
-    if (aznfsc_cfg.consistency_solowriter) {
-        const int64_t file_size = inode->get_file_size();
-        /*
-         * check whether offset greater than on cached filesize.
-         */
-        const bool eof = rpc_api->read_task.get_offset() >
-                    inode->get_cached_filesize();
+    inode->get_file_sizes(sfsize, cfsize);
 
-        if ((file_size != -1) &&
-            (rpc_api->read_task.get_offset() >= file_size) && eof) {
+    /*
+     * get_client_file_size() returns a fairly recent estimate of the file
+     * size taking into account cto consistency, attribute cache timeout, etc,
+     * so it's a size we can "trust". If READ offset is more than this size
+     * then we can avoid sending the call to the server and generate eof
+     * locally. This is an optimization that saves an extra READ call to the
+     * server. The server will correctly return 0+eof for this READ call so we
+     * are functionally correct, barring the small possibility that the file
+     * can grow and if we send the READ to the server we will get the new data,
+     * but this is permissible with our weak/cto cache consistency guarantees.
+     *
+     * TODO: Shall we put it behind a config?
+     */
+    if (cfsize != -1) {
+        if (rpc_api->read_task.get_offset() >= cfsize) {
+            /*
+             * Entire request lies beyond cfsize.
+             */
             AZLogDebug("[{}] Read returning 0 bytes (eof) as requested "
                        "offset ({}) >= file size ({})",
-                       ino, rpc_api->read_task.get_offset(), file_size);
+                       ino, rpc_api->read_task.get_offset(), cfsize);
             reply_iov(nullptr, 0);
             return;
+        } else if ((rpc_api->read_task.get_offset() +
+                    rpc_api->read_task.get_size()) > (uint64_t) cfsize) {
+            /*
+             * Request extends beyond cfsize, trim it so that we don't have
+             * to worry about excluding it later.
+             */
+            const uint64_t trim_len =
+                (rpc_api->read_task.get_offset() +
+                 rpc_api->read_task.get_size()) - cfsize;
+            const uint64_t trimmed_size =
+                rpc_api->read_task.get_size() - trim_len;
+            assert(trimmed_size < rpc_api->read_task.get_size());
+
+            AZLogDebug("[{}] Trimming application read beyond cfsize: {} "
+                       "({} -> {})",
+                       ino, cfsize, rpc_api->read_task.get_size(), trimmed_size);
+
+            rpc_api->read_task.set_size(trimmed_size);
         }
     }
 
@@ -3317,19 +3344,38 @@ void rpc_task::run_read()
     // There should not be any reads running for this RPC task initially.
     assert(num_ongoing_backend_reads == 0);
 
-    AZLogDebug("[{}] run_read: offset {}, size: {}, chunks: {}{}",
+    AZLogDebug("[{}] run_read: offset {}, size: {}, chunks: {}{}, "
+               "sfsize: {}, cfsize: {}",
                ino,
                rpc_api->read_task.get_offset(),
                rpc_api->read_task.get_size(),
                bc_vec.size(),
-               size != bc_vec.size() ? " (capped at 1023)" : "");
+               size != bc_vec.size() ? " (capped at 1023)" : "",
+               sfsize, cfsize);
 
     /*
      * Now go through the byte chunk vector to see if the chunks are
-     * uptodate. For chunks which are not uptodate we will issue read
-     * calls to fetch the data from the NFS server. These will be issued in
-     * parallel. Once all chunks are uptodate we can complete the read to the
-     * caller.
+     * uptodate. Uptodate chunks already have the data we need, while non
+     * uptodate chunks need to be populated with data. These will mostly be
+     * READ from the server, with certain exceptions. See below.
+     * Chunks that are READ from the server are issued in parallel. Once all
+     * chunks are uptodate we can complete the read to the caller.
+     *
+     * Here are the rules that we follow to decide if a non-uptodate chunk
+     * must be READ from the server.
+     * - (bc.offset + bc.length) > get_client_file_size()
+     *   These MUST NOT occur as we trim the read request before making the
+     *   bytes_chunk_cache::get() call. We assert for these.
+     * - bc.offset < get_server_file_size()
+     *   Part or whole of the bc need to be read from the server, so we MUST
+     *   issue READ to the server for such bcs. If part of the bc lies after
+     *   the server file size, read_callback() will fill 0s for that part.
+     *   This is correct as that part corresponds to hole in our cache.
+     * - bc.offset >= get_server_file_size()
+     *   Server does not know about these so we MUST NOT ask the server about
+     *   these. Given that the bc is non-uptodate this means our cache also
+     *   doesn't have it, which means these correspond to holes in our cache
+     *   and we MUST return 0s for these bcs.
      *
      * Note that we bump num_ongoing_backend_reads by 1 before issuing
      * the first backend read. This is done to make sure if read_callback()
@@ -3347,24 +3393,10 @@ void rpc_task::run_read()
 
     [[maybe_unused]] size_t total_length = 0;
     bool found_in_cache = true;
+    bool hole_in_cache = false;
 
     num_ongoing_backend_reads = 1;
 
-    /*
-     * In case of unstable writes, following are the rules:-
-     * 1. offset > cached_filesize then returns eof.
-     * 2. offset + length > attr.size and offset + length < cached_filesize,
-     *    then membuf present in cache, read should be served from there.
-     * 3. offset < attr.size then it should serve from BLOB.
-     *
-     * In case of stable writes, following are the rules:-
-     * 1. offset > cached_filesize then returns eof.
-     * 2. offset > attr.size and offset < cached_filesize, then if membuf
-     *    present, then read should be served from there, otherwise return
-     *    zero buffer.
-     * 3. offset < attr.size then it should serve from BLOB.
-     *
-     */
     for (size_t i = 0; i < bc_vec.size(); i++) {
         /*
          * Every bytes_chunk returned by get() must have its inuse count
@@ -3374,6 +3406,9 @@ void rpc_task::run_read()
         assert(bc_vec[i].get_membuf()->is_inuse());
         assert(bc_vec[i].pvt == 0);
         assert(bc_vec[i].num_backend_calls_issued == 0);
+        // We trim the read size to not exceed cfsize.
+        assert((cfsize == -1) ||
+               ((int64_t) (bc_vec[i].offset + bc_vec[i].length) <= cfsize));
 
         total_length += bc_vec[i].length;
 
@@ -3389,16 +3424,6 @@ void rpc_task::run_read()
         }
 
         if (!bc_vec[i].get_membuf()->is_uptodate()) {
-            bool serve_from_cache = false;
-            if (((bc_vec[i].offset + bc_vec[i].length) <=
-                 (uint64_t) inode->get_cached_filesize()) &&
-                (bc_vec[i].offset >=(uint64_t) inode->get_file_size(true))) {
-                AZLogInfo("BC[{}, {}] lie between cached_filesize {},"
-                    " server-size {}, serve from cache", bc_vec[i].offset,
-                    bc_vec[i].offset+bc_vec[i].length,
-                    inode->get_cached_filesize(), inode->get_file_size(true));
-                serve_from_cache = true;
-            }
             /*
              * Now we are going to call read_from_server() which will issue
              * an NFS read that will read the data from the NFS server and
@@ -3411,16 +3436,7 @@ void rpc_task::run_read()
             bc_vec[i].get_membuf()->set_locked();
 
             // Check if the buffer got updated by the time we got the lock.
-            if (serve_from_cache) {
-                // Not uptodate membuf.
-                if (!bc_vec[i].get_membuf()->is_uptodate()) {
-                    assert(inode->is_stable_write());
-                    assert(bc_vec[i].maps_full_membuf());
-
-                    ::memset(bc_vec[i].get_buffer(), 0, bc_vec[i].length);
-                    bc_vec[i].get_membuf()->set_uptodate();
-                }
-
+            if (bc_vec[i].get_membuf()->is_uptodate()) {
                 /*
                  * Release the lock since we no longer intend on writing
                  * to this buffer.
@@ -3448,6 +3464,32 @@ void rpc_task::run_read()
                  */
                 filecache_handle->release(bc_vec[i].offset, bc_vec[i].length);
 #endif
+                continue;
+            }
+
+            /*
+             * Ok, non-uptodate buffer, see if we should read from server or
+             * return 0s. We read from server only if at least one byte from
+             * the bc can be served from the server, else it's the case of
+             * unmapped chunk within the cached portion (case of sparse cache
+             * due to sparse writes beyond file size) which should correspond
+             * with holes aka 0s.
+             */
+            const bool read_from_server =
+                ((sfsize == -1) || (int64_t) bc_vec[i].offset < sfsize);
+
+            if (!read_from_server) {
+                hole_in_cache = true;
+                AZLogDebug("[{}] Hole in cache. offset: {}, length: {}",
+                           ino, bc_vec[i].offset, bc_vec[i].length);
+
+                /*
+                 * Set "bytes read" to "bytes requested" since we provide all
+                 * the data as 0s.
+                 */
+                bc_vec[i].pvt = bc_vec[i].length;
+                ::memset(bc_vec[i].get_buffer(), 0, bc_vec[i].length);
+                bc_vec[i].get_membuf()->set_uptodate();
                 continue;
             }
 
@@ -3536,6 +3578,7 @@ void rpc_task::run_read()
     assert(num_ongoing_backend_reads >= 1);
     if (--num_ongoing_backend_reads != 0) {
         assert(!found_in_cache);
+        assert(!hole_in_cache);
         /*
          * Not all backend reads have completed yet. When the last backend
          * read completes read_callback() will arrange to send the read
@@ -3793,6 +3836,41 @@ static void read_callback(
                    bc->offset,
                    bc->offset + bc->length,
                    bc->num_backend_calls_issued);
+
+        /*
+         * There's a special case that we need to handle.
+         * Since we support sparse writes (beyond the server file size) we can
+         * have a case where we have a bc which spans the server file size
+         * boundary. This will happen when inode->get_server_file_size() is
+         * less than inode->get_client_file_size() and the portion of the file
+         * after server file size is not cached. For such a bc we issue the
+         * READ call to the server and we expect the server to return partial
+         * bc data + eof. Now we should set rest of the bc to 0s as it
+         * corresponds to hole in the file.
+         */
+        const uint64_t cfsize = inode->get_client_file_size();
+        if (res->READ3res_u.resok.eof &&
+            (res->READ3res_u.resok.count < issued_length) &&
+            ((bc->offset + bc->pvt) < cfsize)) {
+            void *const zb = bc->get_buffer() + bc->pvt;
+            const uint64_t zb_len = cfsize - (bc->offset + bc->pvt);
+
+            AZLogDebug("[{}] <{}> read_callback: bc [{}, {}) spans across "
+                       "server file size boundary, filling remaining {} bytes "
+                       "@ offset {}, with 0s. cfsize: {}, sfsize: {}",
+                       ino, task->issuing_tid,
+                       issued_offset,
+                       issued_offset + issued_length,
+                       zb_len, bc->offset + bc->pvt,
+                       cfsize,
+                       inode->get_server_file_size());
+
+            assert(zb_len > 0);
+            ::memset(zb, 0, zb_len);
+            // Added zb_len more bytes to bc.
+            bc->pvt += zb_len;
+            assert(bc->pvt <= bc->length);
+        }
 
         /*
          * In case of partial read, issue read for the remaining.
