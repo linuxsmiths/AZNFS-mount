@@ -178,9 +178,12 @@ membuf::~membuf()
  */
 void membuf::trim(uint64_t trim_len, bool left)
 {
-    // Can't trim more than the current size.
+    /*
+     * Can't trim more than the current size and can't trim the entire
+     * membuf (in that case it'd be rather deleted).
+     */
     assert(trim_len > 0);
-    assert(trim_len <= length);
+    assert(trim_len < length);
 
     /*
      * Update offset and length to reflect values after trim.
@@ -194,7 +197,31 @@ void membuf::trim(uint64_t trim_len, bool left)
          *       do that and it's ok as all callers access the buffer via
          *       bytes_chunk::get_buffer().
          */
+    } else {
+        /*
+         * If this is the last uptodate chunk, then cache_size also must be
+         * reduced.
+         */
+        if (is_uptodate()) {
+            // cache_size must incorporate all uptodate membufs.
+            assert(bcc->cache_size >= (offset + length));
+
+            /*
+             * Atomically update cache_size, making sure we don't ovewrite
+             * a higher value set by some other thread. No other thread can
+             * set it to a lower value as this membuf is still in chunkmap.
+             */
+            uint64_t expected = offset + length;
+            bcc->cache_size.compare_exchange_strong(expected, expected - trim_len);
+            // Some other thread can increase cache_size, but not reduce it.
+            assert(bcc->cache_size >= (expected - trim_len));
+        } else {
+            // If not update, cache_size cannot incorporate this membuf.
+            assert(bcc->cache_size > (offset + length) ||
+                   bcc->cache_size <= offset);
+        }
     }
+
     length -= trim_len;
 
     /*
@@ -393,12 +420,22 @@ void membuf::set_uptodate()
     assert(is_inuse());
 
     /*
-     * We set MB_Flag::Uptodate conditionally to keep the bytes_uptodate
+     * We set MB_Flag::Uptodate atomically to keep the bytes_uptodate
      * metrics sane. Also the debug log is helpful to understand when a
      * membuf actually became uptodate for the first time.
      */
-    if (!(flag & MB_Flag::Uptodate)) {
-        flag |= MB_Flag::Uptodate;
+    if (!(flag.fetch_or(MB_Flag::Uptodate) & MB_Flag::Uptodate)) {
+        /*
+         * If this membuf is beyond the current cache_size, increase
+         * cache_size. cache_size can be simultaneously updated by other
+         * set_uptodate() and release() calls, so we must make sure that we:
+         * - don't overwrite any higher value set by some other thread, and we
+         * - set it no lesser than (offset + length).
+         */
+        while (bcc->cache_size < (offset + length)) {
+            uint64_t expected = bcc->cache_size;
+            bcc->cache_size.compare_exchange_strong(expected, offset + length);
+        }
 
         bcc->bytes_uptodate_g += length;
         bcc->bytes_uptodate += length;
@@ -757,11 +794,9 @@ void membuf::set_dirty()
     assert(!is_commit_pending());
 
     // If already dirty, skip the metrics update for accurate accounting.
-    if (flag & MB_Flag::Dirty) {
+    if (flag.fetch_or(MB_Flag::Dirty) & MB_Flag::Dirty) {
         return;
     }
-
-    flag |= MB_Flag::Dirty;
 
     bcc->bytes_dirty_g += length;
     bcc->bytes_dirty += length;
@@ -1886,10 +1921,15 @@ allocate_only_chunk:
         uint64_t bytes_released_tmp = 0;
 
         if (begin_delete != chunkmap.end()) {
+            bool update_cache_size = false;
+            auto begin_search =
+                (begin_delete != chunkmap.begin()) ? std::prev(begin_delete)
+                                                   : chunkmap.end();
             for (auto _it = begin_delete, next_it = _it;
                  _it != end_delete; _it = next_it) {
                 ++next_it;
                 bc = &(_it->second);
+                struct membuf *mb = bc->get_membuf();
                 /*
                  * Not all chunks from begin_delete to end_delete are
                  * guaranteed safe-to-delete, so check before deleting.
@@ -1915,7 +1955,70 @@ allocate_only_chunk:
 
                     bytes_released_tmp += bc->length;
 
+                    /*
+                     * If cache_size falls in any of the released chunks, we
+                     * will need to update it (to the last uptodate byte)
+                     * searching backwards from the first deleted chunk).
+                     * We are holding chunkmap_lock_43 so cache_size cannot
+                     * be reduced, but it can be increased by some other thread
+                     * calling set_uptodate().
+                     */
+                    if (mb->is_uptodate()) {
+                        // cache_size must incorporate all uptodate membufs.
+                        assert(cache_size >= (bc->offset + bc->length));
+
+                        if (cache_size == (bc->offset + bc->length)) {
+                            update_cache_size = true;
+                        }
+                    } else {
+                        /*
+                         * If not uptodate, cache_size cannot incorporate this
+                         * membuf.
+                         */
+                        assert(cache_size > (bc->offset + bc->length) ||
+                               cache_size <= bc->offset);
+                    }
+
                     chunkmap.erase(_it);
+                }
+            }
+
+            if (update_cache_size) {
+                /*
+                 * cache_size is only reduced with chunkmap_lock_43 held and
+                 * we are holding the chunkmap_lock_43, so it cannot be reduced
+                 * by some other thread, but it can be increased by some other
+                 * thread as set_uptodate() does not need chunkmap_lock_43.
+                 * Try to set it to this mb's right edge unless someone wants
+                 * to increase it.
+                 */
+                if (begin_search == chunkmap.end()) {
+                    uint64_t expected = cache_size;
+                    cache_size.compare_exchange_strong(expected, 0);
+                } else {
+                    do {
+                        struct bytes_chunk *bc = &(begin_search->second);
+                        struct membuf *mb = bc->get_membuf();
+                        if (mb->is_uptodate()) {
+                            assert(cache_size > (mb->offset + mb->length));
+
+                            uint64_t expected = cache_size;
+                            cache_size.compare_exchange_strong(
+                                    expected, mb->offset + mb->length);
+                            update_cache_size = false;
+                            break;
+                        }
+                    } while (begin_search-- != chunkmap.begin());
+
+                    /*
+                     * We didn't find any uptodate chunk to the left of the
+                     * first deleted chunk. This means cache_size must be set
+                     * to 0.
+                     */
+                    if (update_cache_size) {
+                        uint64_t expected = cache_size;
+                        cache_size.compare_exchange_strong(expected, 0);
+                    }
                 }
             }
         }
@@ -1984,6 +2087,21 @@ allocate_only_chunk:
     }
 
 end:
+    // cache_size must be 0 for an empty cache.
+    assert(!chunkmap.empty() || (cache_size == 0));
+
+    /*
+     * We cannot assert the following as bytes_uptodate is only updated
+     * inside the membuf destructor and that would be called only when the
+     * last ref is dropped, so we may delete a chunk from chunkmap in scan()
+     * and reduce cache_size, but bytes_uptodate may still not have been
+     * reduced.
+     */
+#if 0
+    // If bytes_uptodate is 0/non-0 cache_size must be 0/non-0.
+    assert((cache_size == 0) == (bytes_uptodate == 0));
+#endif
+
     return (action == scan_action::SCAN_ACTION_GET)
                 ? chunkvec : std::vector<bytes_chunk>();
 }
@@ -2167,6 +2285,30 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
                 mb->clear_inuse();
 
                 chunkmap.erase(it);
+            }
+        }
+
+        /*
+         * Recalculate cache size.
+         */
+        for (auto it = chunkmap.rbegin(); it != chunkmap.rend(); ++it) {
+            struct bytes_chunk *bc = &(it->second);
+            struct membuf *mb = bc->get_membuf();
+            if (mb->is_uptodate()) {
+                assert(cache_size >= (mb->offset + mb->length));
+                /*
+                 * cache_size is only reduced with chunkmap_lock_43
+                 * held and we are holding the chunkmap_lock_43, so
+                 * it cannot be reduced by some other thread, but
+                 * it can be increased by some other thread as
+                 * set_uptodate() does not need chunkmap_lock_43.
+                 * Try to set it to this mb's right edge unless
+                 * someone wants to increase it.
+                 */
+                uint64_t expected = cache_size;
+                cache_size.compare_exchange_strong(expected, mb->offset + mb->length);
+                assert(cache_size >= mb->offset + mb->length);
+                break;
             }
         }
     }

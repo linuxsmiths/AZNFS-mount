@@ -3345,13 +3345,13 @@ void rpc_task::run_read()
     assert(num_ongoing_backend_reads == 0);
 
     AZLogDebug("[{}] run_read: offset {}, size: {}, chunks: {}{}, "
-               "sfsize: {}, cfsize: {}",
+               "sfsize: {}, cfsize: {}, csfsize: {}",
                ino,
                rpc_api->read_task.get_offset(),
                rpc_api->read_task.get_size(),
                bc_vec.size(),
                size != bc_vec.size() ? " (capped at 1023)" : "",
-               sfsize, cfsize);
+               sfsize, cfsize, inode->get_cached_filesize());
 
     /*
      * Now go through the byte chunk vector to see if the chunks are
@@ -3842,28 +3842,30 @@ static void read_callback(
          * Since we support sparse writes (beyond the server file size) we can
          * have a case where we have a bc which spans the server file size
          * boundary. This will happen when inode->get_server_file_size() is
-         * less than inode->get_client_file_size() and the portion of the file
-         * after server file size is not cached. For such a bc we issue the
-         * READ call to the server and we expect the server to return partial
-         * bc data + eof. Now we should set rest of the bc to 0s as it
+         * less than inode->get_cached_filesize() and the portion of the file
+         * immediately after server file size is not cached. For such a bc we
+         * issue the READ call to the server and we expect the server to return
+         * partial bc data + eof. Now we should set rest of the bc to 0s as it
          * corresponds to hole in the file.
          */
-        const uint64_t cfsize = inode->get_client_file_size();
+        const uint64_t csfsize = inode->get_cached_filesize();
         if (res->READ3res_u.resok.eof &&
             (res->READ3res_u.resok.count < issued_length) &&
-            ((bc->offset + bc->pvt) < cfsize)) {
+            ((bc->offset + bc->pvt) < csfsize)) {
             void *const zb = bc->get_buffer() + bc->pvt;
-            const uint64_t zb_len = cfsize - (bc->offset + bc->pvt);
+            const int64_t zb_len =
+                std::min(csfsize, bc->offset + bc->length) - (bc->offset + bc->pvt);
 
             AZLogDebug("[{}] <{}> read_callback: bc [{}, {}) spans across "
                        "server file size boundary, filling remaining {} bytes "
-                       "@ offset {}, with 0s. cfsize: {}, sfsize: {}",
+                       "@ offset {}, with 0s. cfsize: {}, sfsize: {}, csfsize: {}",
                        ino, task->issuing_tid,
                        issued_offset,
                        issued_offset + issued_length,
                        zb_len, bc->offset + bc->pvt,
-                       cfsize,
-                       inode->get_server_file_size());
+                       inode->get_client_file_size(),
+                       inode->get_server_file_size(),
+                       csfsize);
 
             assert(zb_len > 0);
             ::memset(zb, 0, zb_len);

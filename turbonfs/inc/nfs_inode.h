@@ -297,9 +297,7 @@ private:
      *   written by the application and saved in file cache. It may or may not
      *   have been flushed and/or committed. This is the most uptodate view of
      *   the file and applications must use this view.
-     *   cached_filesize tracks the file size for this view.
-     *   When cache is invalidated (in response to postop attributes received
-     *   that suggest file data has changed), cached_filesize is reset to 0.
+     *   get_cached_filesize() returns the cached file size.
      * - Uncommited.
      *   This is the view of the file that tracks data that has been flushed
      *   using UNSTABLE writes but not yet COMMITted to the Blob. This view of
@@ -311,17 +309,7 @@ private:
      *   Other clients will see this view.
      *   attr.st_size tracks the file size for this view.
      */
-    off_t cached_filesize = 0;
     off_t putblock_filesize = 0;
-
-    /*
-     * Has this inode seen any non-append write?
-     * This starts as false and remains false as long as copy_to_cache() only
-     * adds writes to the end of file. Once any write either adds data beyond
-     * eof or overwrites some existing bytes of the file, this is set to true.
-     * Once set to true it never goes back to false.
-     */
-    bool non_append_writes_seen = false;
 
     /*
      * For any file stable_write starts as false as write pattern is unknown.
@@ -579,6 +567,15 @@ public:
      * LOCKS: None.
      */
     std::shared_ptr<bytes_chunk_cache>& get_filecache()
+    {
+        assert(is_regfile());
+        assert(filecache_alloced);
+        assert(filecache_handle);
+
+        return filecache_handle;
+    }
+
+    const std::shared_ptr<bytes_chunk_cache>& get_filecache() const
     {
         assert(is_regfile());
         assert(filecache_alloced);
@@ -1006,8 +1003,12 @@ public:
         return attr_expired;
     }
 
-    off_t get_cached_filesize() const
+    int64_t get_cached_filesize() const
     {
+        assert(is_regfile());
+        assert(has_filecache());
+
+        const int64_t cached_filesize = get_filecache()->get_cache_size();
         assert(cached_filesize >= 0);
         assert(cached_filesize <= (off_t) AZNFSC_MAX_FILE_SIZE);
         return cached_filesize;
@@ -1046,14 +1047,14 @@ public:
      * Get client's most recent estimate of the file size.
      * Note that unlike get_server_file_size() which estimates the file size
      * strictly as present on the server, this is a size estimate that matters
-     * from the client applications' pov. It considers the cached_filesize
-     * also and returns the max of the server file size and cached_filesize.
-     * Note that cached_filesize corresponds to data which has not yet been
+     * from the client applications' pov. It considers the cached filesize
+     * also and returns the max of the server file size and cached filesize.
+     * Note that cached filesize corresponds to data which has not yet been
      * synced with the server, so won't be reflected in the server file size,
      * but reader applications would be interested in cached data too.
      *
      * Returns -1 to indicate that we do not have a good estimate of the file
-     * size. Since we always know the cached_filesize for sure, this happens
+     * size. Since we always know the cached filesize for sure, this happens
      * when we do not know the recent server file size (within the last
      * attributes cache timeout period).
      *
@@ -1100,37 +1101,24 @@ public:
 
     /**
      * This must be called from copy_to_cache() whenever we successfully copy
-     * some data to filecache. If it copies data beyond cached_filesize, we
-     * must update cached_filesize so that it holds the correct cached file
-     * size.
+     * some data to filecache.
      *
      * Note: It doesn't update attr.ctime and attr.mtime deliberately as this
      *       is not authoritative info and we would want to fetch attributes
-     *       from server when needed. This size updation helps get_file_size()
-     *       call made from run_read() in solowriter mode so that we don't
-     *       return eof incorrectly, while we have data sitting in cache.
+     *       from server when needed.
      */
     void on_cached_write(off_t offset, size_t length)
     {
+        [[maybe_unused]]
         const off_t new_size = offset + length;
-
-        std::unique_lock<std::shared_mutex> lock(ilock_1);
+        [[maybe_unused]]
+        const off_t cached_filesize = (off_t) get_filecache()->get_cache_size();
 
         /*
-         * TODO: Need to correctly handle the case when attr.st_size is updated
-         *       from write_iov_callback() with the postop attr received.
-         *       We might want to maintain cached file size which won't be
-         *       updated from postop attributes. We will need to correctly
-         *       update that when file is truncated f.e.
+         * on_cached_write() is called after set_uptodate() so cached_filesize
+         * must already have been updated.
          */
-        if (!non_append_writes_seen && (offset != cached_filesize)) {
-            non_append_writes_seen = true;
-            AZLogInfo("[{}] Non-append write seen [{}, {}), file size: {}",
-                      ino, offset, offset+length, cached_filesize);
-        }
-
-        // Highest byte offset written is the cached_filesize.
-        cached_filesize = std::max(new_size, cached_filesize);
+        assert(cached_filesize >= new_size);
     }
 
     /**

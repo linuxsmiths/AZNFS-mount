@@ -1470,8 +1470,6 @@ void nfs_inode::truncate_end(size_t size)
         assert(putblock_filesize == (off_t) AZNFSC_BAD_OFFSET);
     }
 
-    cached_filesize = size;
-
     AZLogDebug("[{}] <truncate_end> Filecache truncated to size={} "
                "(bytes truncated: {}){}",
                ino, size, bytes_truncated,

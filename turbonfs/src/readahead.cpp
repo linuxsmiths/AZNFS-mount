@@ -483,10 +483,13 @@ int ra_state::issue_readaheads()
      */
     while ((ra_offset = get_next_ra()) > 0) {
         AZLogDebug("[{}] Issuing readahead at off: {} len: {}: ongoing: {} "
-                   "sfsize: {} cfsize: {} ({})",
+                   "sfsize: {} cfsize: {} csfsize: {} ({})",
                    inode->get_fuse_ino(), ra_offset, def_ra_size,
-                   ra_ongoing.load(), inode->get_server_file_size(),
-                   inode->get_client_file_size(), ra_bytes);
+                   ra_ongoing.load(),
+                   inode->get_server_file_size(),
+                   inode->get_client_file_size(),
+                   inode->get_cached_filesize(),
+                   ra_bytes);
 
         /*
          * Get bytes_chunk representing the byte range we want to readahead

@@ -1787,6 +1787,20 @@ public:
         return inode;
     }
 
+    /**
+     * Cache size is defined as 1+ offset of the last uptodate byte.
+     *
+     * Note: It can change anytime after this, so use it only as an estimate
+     *       which can be stale.
+     */
+    uint64_t get_cache_size() const
+    {
+        assert(cache_size <= AZNFSC_MAX_FILE_SIZE);
+        // bytes_uptodate is a count while cache_size is an offset.
+        assert(cache_size >= bytes_uptodate);
+        return cache_size;
+    }
+
 private:
     /**
      * Scan all chunks lying in the range [offset, offset+length) and perform
@@ -1844,6 +1858,14 @@ private:
      * std::map of bytes_chunk, indexed by the starting offset of the chunk.
      */
     std::map<uint64_t, struct bytes_chunk> chunkmap;
+
+    /*
+     * Current size of the cache.
+     * This is 1+ offset of the last uptodate byte.
+     * Increased in set_uptodate() and decreased in release() when the last
+     * uptodate chunk is freed.
+     */
+    std::atomic<uint64_t> cache_size = 0;
 
     // Lock to protect chunkmap.
     mutable std::mutex chunkmap_lock_43;
