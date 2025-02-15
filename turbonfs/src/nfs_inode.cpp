@@ -1498,7 +1498,11 @@ bool nfs_inode::truncate_start(size_t size)
 {
     set_truncate_in_progress();
 
-    AZLogDebug("[{}] truncate_start() called, size={}", ino, size);
+    AZLogDebug("[{}] truncate_start() called, size={} [S: {}, C: {}, CS: {}]",
+               ino, size,
+               get_server_file_size(),
+               get_client_file_size(),
+               get_cached_filesize());
 
     /*
      * Caller must call truncate_start() for regular files only.

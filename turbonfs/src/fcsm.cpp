@@ -1223,10 +1223,12 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
         assert(flushed_seq_num <= flushing_seq_num);
 
         AZLogDebug("[{}] [FCSM] continuing, flushing_seq_num now: {}, "
-                   "flushed_seq_num: {}",
+                   "flushed_seq_num: {}, bc_vec.size(): {}, FQ: {}, CQ: {}",
                    inode->get_fuse_ino(),
                    flushing_seq_num.load(),
-                   flushed_seq_num.load());
+                   flushed_seq_num.load(),
+                   bc_vec.size(),
+                   ftgtq.size(), ctgtq.size());
 
         // sync_membufs() will update flushing_seq_num.
         [[maybe_unused]]
