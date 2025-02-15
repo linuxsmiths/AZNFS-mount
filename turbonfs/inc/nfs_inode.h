@@ -325,6 +325,12 @@ private:
      */
     bool stable_write = true;
 
+    /*
+     * XXX This is for debugging.
+     *     It's set in truncate_start() and cleared in truncate_end().
+     */
+    std::atomic<bool> truncate_in_progress = false;
+
 public:
     /*
      * Fuse inode number.
@@ -1001,6 +1007,23 @@ public:
         const bool attr_expired = (attr_timeout_timestamp < now_msecs);
 
         return attr_expired;
+    }
+
+    void set_truncate_in_progress()
+    {
+        assert(!truncate_in_progress);
+        truncate_in_progress = true;
+    }
+
+    void clear_truncate_in_progress()
+    {
+        assert(truncate_in_progress);
+        truncate_in_progress = false;
+    }
+
+    bool is_truncate_in_progress() const
+    {
+        return truncate_in_progress;
     }
 
     int64_t get_cached_filesize() const

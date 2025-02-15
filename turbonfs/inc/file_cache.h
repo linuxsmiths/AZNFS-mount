@@ -1796,12 +1796,23 @@ public:
     uint64_t get_cache_size() const
     {
         assert(cache_size <= AZNFSC_MAX_FILE_SIZE);
-        // bytes_uptodate is a count while cache_size is an offset.
+        /*
+         * bytes_uptodate is a count while cache_size is an offset.
+         * set_uptodate() updates cache_size before bytes_uptodate so we can
+         * safely assert for this. Also truncate() reduces cache_size after
+         * reducing bytes_uptodate.
+         *
+         * Note: If read races with truncate we can have truncate() release
+         *       the membuf(s) but its destructor may not be called hence
+         *       bytes_uptodate may be reduced after cache_size causing this
+         *       assert to fail, but that should be rare so leave the assert.
+         */
         assert(cache_size >= bytes_uptodate);
         return cache_size;
     }
 
 private:
+
     /**
      * Scan all chunks lying in the range [offset, offset+length) and perform
      * requested action, as described below:
@@ -1859,16 +1870,22 @@ private:
      */
     std::map<uint64_t, struct bytes_chunk> chunkmap;
 
-    /*
-     * Current size of the cache.
-     * This is 1+ offset of the last uptodate byte.
-     * Increased in set_uptodate() and decreased in release() when the last
-     * uptodate chunk is freed.
-     */
-    std::atomic<uint64_t> cache_size = 0;
-
     // Lock to protect chunkmap.
     mutable std::mutex chunkmap_lock_43;
+
+    /*
+     * Size of the cache.
+     * This is 1+ offset of the last uptodate byte seen by this cache.
+     * Increased in set_uptodate() and decreased *only* in truncate() iff
+     * truncate shrinks the file size. Note that this reflects the maximum
+     * cache size that we had till now and not necessarily what the current
+     * cache holds. IOW, release()/clear()/inline_prune() may release one or
+     * more chunks thus removing the actual cache contents, but it doesn't
+     * reduce the cache_size.
+     *
+     * Note: It should actually be called cached_filesize.
+     */
+    std::atomic<uint64_t> cache_size = 0;
 
     /*
      * File whose data we are cacheing.

@@ -1476,13 +1476,22 @@ void nfs_inode::truncate_end(size_t size)
                is_stable_write() ? " STABLE" : " UNSTABLE");
 
     flush_unlock();
+
+    clear_truncate_in_progress();
 }
 
 /*
  * Note: This takes exclusive lock on flush_lock.
+ *
+ * Note: VFS will call truncate while holding the inode lock exclusively, so
+ *       no new writes can be issued while truncate is going on. Similarly
+ *       while any fuse write is pending with us, VFS will not issue a
+ *       truncate call for the file.
  */
 bool nfs_inode::truncate_start(size_t size)
 {
+    set_truncate_in_progress();
+
     AZLogDebug("[{}] truncate_start() called, size={}", ino, size);
 
     /*
@@ -1502,7 +1511,8 @@ bool nfs_inode::truncate_start(size_t size)
      * (Pre) cache truncate does the majority of the cache truncate work.
      * It waits for any ongoing IOs on any of the affected membufs before
      * removing them from the cache. Depending on the ongoing IOs, it can
-     * take a long time.
+     * take a long time. Note that VFS calls truncate under inode lock, so
+     * no new writes can be issued while we are truncating.
      * After that we grab the flush_lock to prevent any new writes to start,
      * and wait for all ongoing writes (these can only be the ones started
      * after our cache truncate returns, since it waited for the IOs too).
@@ -1518,6 +1528,32 @@ bool nfs_inode::truncate_start(size_t size)
     AZLogDebug("[{}] <truncate_start> Filecache truncated to size={} "
                "(bytes truncated: {})",
                ino, size, bytes_truncated);
+
+#if 0
+    /*
+     * Now flush+commit the non-truncated part of the cache.
+     * We should be able to avoid this step, but we do it for robustness and
+     * to keep it simple. Since truncate should not be a common operation,
+     * it should be ok. Actually what we really want is to make sure that for
+     * a membuf that spans across the truncate boundary, we don't have any
+     * ongoing flush+commit when truncate(post=true) is called.
+     */
+    const int ret = flush_cache_and_wait();
+    if (ret) {
+        AZLogError("[{}] <truncate_start> Flush cache failed with error {} "
+                   "(truncate size: {})",
+                   ino, ret, size);
+        /*
+         * TODO: Once the caller handles failures from truncate_start(), remove
+         *       this assert. Caller should fail the fuse truncate call.
+         */
+#if 0
+        return false;
+#else
+        assert(0);
+#endif
+    }
+#endif
 
     /*
      * Grab flush_lock, so that no new flush or commit can be issued

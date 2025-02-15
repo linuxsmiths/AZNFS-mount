@@ -2635,6 +2635,9 @@ void rpc_task::run_write()
     assert(inode->has_filecache());
     assert(inode->has_fcsm());
 
+    // truncate and write are serialized by the VFS inode lock.
+    assert(!inode->is_truncate_in_progress());
+
     // There should not be any writes running for this RPC task initially.
     assert(num_ongoing_backend_writes == 0);
 

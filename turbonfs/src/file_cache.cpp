@@ -197,29 +197,6 @@ void membuf::trim(uint64_t trim_len, bool left)
          *       do that and it's ok as all callers access the buffer via
          *       bytes_chunk::get_buffer().
          */
-    } else {
-        /*
-         * If this is the last uptodate chunk, then cache_size also must be
-         * reduced.
-         */
-        if (is_uptodate()) {
-            // cache_size must incorporate all uptodate membufs.
-            assert(bcc->cache_size >= (offset + length));
-
-            /*
-             * Atomically update cache_size, making sure we don't ovewrite
-             * a higher value set by some other thread. No other thread can
-             * set it to a lower value as this membuf is still in chunkmap.
-             */
-            uint64_t expected = offset + length;
-            bcc->cache_size.compare_exchange_strong(expected, expected - trim_len);
-            // Some other thread can increase cache_size, but not reduce it.
-            assert(bcc->cache_size >= (expected - trim_len));
-        } else {
-            // If not update, cache_size cannot incorporate this membuf.
-            assert(bcc->cache_size > (offset + length) ||
-                   bcc->cache_size <= offset);
-        }
     }
 
     length -= trim_len;
@@ -428,8 +405,8 @@ void membuf::set_uptodate()
         /*
          * If this membuf is beyond the current cache_size, increase
          * cache_size. cache_size can be simultaneously updated by other
-         * set_uptodate() and release() calls, so we must make sure that we:
-         * - don't overwrite any higher value set by some other thread, and we
+         * set_uptodate() calls, so we must make sure that we:
+         * - don't overwrite any higher value set by some other thread.
          * - set it no lesser than (offset + length).
          */
         while (bcc->cache_size < (offset + length)) {
@@ -442,8 +419,10 @@ void membuf::set_uptodate()
 
         assert(bcc->bytes_uptodate <= AZNFSC_MAX_FILE_SIZE);
 
-        AZLogDebug("Set uptodate membuf [{}, {}), fd={}",
-                   offset.load(), offset.load()+length.load(), backing_file_fd);
+        AZLogDebug("[{}] Set uptodate membuf [{}, {}), fd={}, cache_size={}",
+                   bcc->inode->get_fuse_ino(),
+                   offset.load(), offset.load()+length.load(),
+                   backing_file_fd, bcc->cache_size.load());
     }
 }
 
@@ -465,7 +444,8 @@ void membuf::clear_uptodate()
     bcc->bytes_uptodate -= length;
     bcc->bytes_uptodate_g -= length;
 
-    AZLogWarn("Clear uptodate membuf [{}, {}), fd={}",
+    AZLogWarn("[{}] Clear uptodate membuf [{}, {}), fd={}",
+              bcc->inode->get_fuse_ino(),
               offset.load(), offset.load()+length.load(), backing_file_fd);
 
     /*
@@ -503,7 +483,8 @@ void membuf::set_commit_pending()
 
     assert(bcc->bytes_commit_pending <= AZNFSC_MAX_FILE_SIZE);
 
-    AZLogDebug("Set commit pending membuf [{}, {}), fd={}",
+    AZLogDebug("[{}] Set commit pending membuf [{}, {}), fd={}",
+               bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(), backing_file_fd);
 }
 
@@ -544,7 +525,8 @@ void membuf::clear_commit_pending()
     bcc->bytes_commit_pending -= length;
     bcc->bytes_commit_pending_g -= length;
 
-    AZLogDebug("Clear commit pending membuf [{}, {}), fd={}",
+    AZLogDebug("[{}] Clear commit pending membuf [{}, {}), fd={}",
+               bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(), backing_file_fd);
 }
 
@@ -596,7 +578,8 @@ void membuf::set_flushing()
 
     assert(bcc->bytes_flushing <= AZNFSC_MAX_FILE_SIZE);
 
-    AZLogDebug("Set flushing membuf [{}, {}), fd={}",
+    AZLogDebug("[{}] Set flushing membuf [{}, {}), fd={}",
+               bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(), backing_file_fd);
 }
 
@@ -637,7 +620,8 @@ void membuf::clear_flushing()
     bcc->bytes_flushing -= length;
     bcc->bytes_flushing_g -= length;
 
-    AZLogDebug("Clear flushing membuf [{}, {}), fd={}",
+    AZLogDebug("[{}] Clear flushing membuf [{}, {}), fd={}",
+               bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(),
                backing_file_fd);
 }
@@ -803,7 +787,8 @@ void membuf::set_dirty()
 
     assert(bcc->bytes_dirty <= AZNFSC_MAX_FILE_SIZE);
 
-    AZLogDebug("Set dirty membuf [{}, {}), fd={}",
+    AZLogDebug("[{}] Set dirty membuf [{}, {}), fd={}",
+               bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(), backing_file_fd);
 }
 
@@ -826,7 +811,8 @@ void membuf::clear_dirty()
     bcc->bytes_dirty -= length;
     bcc->bytes_dirty_g -= length;
 
-    AZLogDebug("Clear dirty membuf [{}, {}), fd={}",
+    AZLogDebug("[{}] Clear dirty membuf [{}, {}), fd={}",
+               bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(), backing_file_fd);
 }
 
@@ -851,7 +837,8 @@ void membuf::set_truncated()
     assert(!is_flushing());
     flag |= MB_Flag::Truncated;
 
-    AZLogDebug("Set truncated membuf [{}, {}), fd={}",
+    AZLogDebug("[{}] Set truncated membuf [{}, {}), fd={}",
+               bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(), backing_file_fd);
 }
 
@@ -862,7 +849,8 @@ void membuf::set_inuse()
 
     inuse++;
 
-    AZLogDebug("Setting inuse membuf [{}, {}), fd={}, new inuse count: {}",
+    AZLogDebug("[{}] Setting inuse membuf [{}, {}), fd={}, new inuse count: {}",
+               bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(), backing_file_fd, inuse.load());
 }
 
@@ -881,7 +869,8 @@ void membuf::clear_inuse()
     assert(inuse > 0);
     inuse--;
 
-    AZLogDebug("Clearing inuse membuf [{}, {}), fd={}, new inuse count: {}",
+    AZLogDebug("[{}] Clearing inuse membuf [{}, {}), fd={}, new inuse count: {}",
+               bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(), backing_file_fd, inuse.load());
 }
 
@@ -1921,15 +1910,10 @@ allocate_only_chunk:
         uint64_t bytes_released_tmp = 0;
 
         if (begin_delete != chunkmap.end()) {
-            bool update_cache_size = false;
-            auto begin_search =
-                (begin_delete != chunkmap.begin()) ? std::prev(begin_delete)
-                                                   : chunkmap.end();
             for (auto _it = begin_delete, next_it = _it;
                  _it != end_delete; _it = next_it) {
                 ++next_it;
                 bc = &(_it->second);
-                struct membuf *mb = bc->get_membuf();
                 /*
                  * Not all chunks from begin_delete to end_delete are
                  * guaranteed safe-to-delete, so check before deleting.
@@ -1955,70 +1939,7 @@ allocate_only_chunk:
 
                     bytes_released_tmp += bc->length;
 
-                    /*
-                     * If cache_size falls in any of the released chunks, we
-                     * will need to update it (to the last uptodate byte)
-                     * searching backwards from the first deleted chunk).
-                     * We are holding chunkmap_lock_43 so cache_size cannot
-                     * be reduced, but it can be increased by some other thread
-                     * calling set_uptodate().
-                     */
-                    if (mb->is_uptodate()) {
-                        // cache_size must incorporate all uptodate membufs.
-                        assert(cache_size >= (bc->offset + bc->length));
-
-                        if (cache_size == (bc->offset + bc->length)) {
-                            update_cache_size = true;
-                        }
-                    } else {
-                        /*
-                         * If not uptodate, cache_size cannot incorporate this
-                         * membuf.
-                         */
-                        assert(cache_size > (bc->offset + bc->length) ||
-                               cache_size <= bc->offset);
-                    }
-
                     chunkmap.erase(_it);
-                }
-            }
-
-            if (update_cache_size) {
-                /*
-                 * cache_size is only reduced with chunkmap_lock_43 held and
-                 * we are holding the chunkmap_lock_43, so it cannot be reduced
-                 * by some other thread, but it can be increased by some other
-                 * thread as set_uptodate() does not need chunkmap_lock_43.
-                 * Try to set it to this mb's right edge unless someone wants
-                 * to increase it.
-                 */
-                if (begin_search == chunkmap.end()) {
-                    uint64_t expected = cache_size;
-                    cache_size.compare_exchange_strong(expected, 0);
-                } else {
-                    do {
-                        struct bytes_chunk *bc = &(begin_search->second);
-                        struct membuf *mb = bc->get_membuf();
-                        if (mb->is_uptodate()) {
-                            assert(cache_size > (mb->offset + mb->length));
-
-                            uint64_t expected = cache_size;
-                            cache_size.compare_exchange_strong(
-                                    expected, mb->offset + mb->length);
-                            update_cache_size = false;
-                            break;
-                        }
-                    } while (begin_search-- != chunkmap.begin());
-
-                    /*
-                     * We didn't find any uptodate chunk to the left of the
-                     * first deleted chunk. This means cache_size must be set
-                     * to 0.
-                     */
-                    if (update_cache_size) {
-                        uint64_t expected = cache_size;
-                        cache_size.compare_exchange_strong(expected, 0);
-                    }
                 }
             }
         }
@@ -2087,27 +2008,19 @@ allocate_only_chunk:
     }
 
 end:
-    // cache_size must be 0 for an empty cache.
-    assert(!chunkmap.empty() || (cache_size == 0));
-
-    /*
-     * We cannot assert the following as bytes_uptodate is only updated
-     * inside the membuf destructor and that would be called only when the
-     * last ref is dropped, so we may delete a chunk from chunkmap in scan()
-     * and reduce cache_size, but bytes_uptodate may still not have been
-     * reduced.
-     */
-#if 0
-    // If bytes_uptodate is 0/non-0 cache_size must be 0/non-0.
-    assert((cache_size == 0) == (bytes_uptodate == 0));
-#endif
-
     return (action == scan_action::SCAN_ACTION_GET)
                 ? chunkvec : std::vector<bytes_chunk>();
 }
 
 uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
 {
+    /*
+     * Must be called only when inode is being truncated.
+     * Then we are guaranteed that no new writes will be sent by fuse, which
+     * means no simultaneous calls to set_uptodate() can be updating cache_size.
+     */
+    assert(!inode || inode->is_truncate_in_progress());
+
     assert(trunc_len <= AZNFSC_MAX_FILE_SIZE);
 
     /*
@@ -2193,6 +2106,17 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
                 AZLogInfo("<Truncate {}> POST failed to lock membuf "
                           "[{},{})",
                           trunc_len, bc.offset, bc.offset + bc.length);
+                /*
+                 * There cannot be any writes issued by VFS while truncate is
+                 * still not complete so we cannot have lock held by writers.
+                 * Reads can be issued but since truncate() would have reduced
+                 * the cache_size, we won't issue reads beyond the truncated
+                 * size so reads also cannot hold the membuf lock.
+                 * There is one small possibility that truncate falls between
+                 * a membuf and that membuf is being read. It's a very small
+                 * race so we leave the useful assert.
+                 */
+                assert(0);
             }
         } else {
             mb->set_locked();
@@ -2284,6 +2208,11 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
                 mb->clear_locked();
                 mb->clear_inuse();
 
+                /*
+                 * membuf destructor will be called here unless read path
+                 * gets a ref to this membuf. Note that writes won't be
+                 * coming as VFS will serialize them with truncate.
+                 */
                 chunkmap.erase(it);
             }
         }
@@ -2291,25 +2220,39 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
         /*
          * Recalculate cache size.
          */
+        bool cache_size_updated = false;
+
         for (auto it = chunkmap.rbegin(); it != chunkmap.rend(); ++it) {
             struct bytes_chunk *bc = &(it->second);
             struct membuf *mb = bc->get_membuf();
             if (mb->is_uptodate()) {
                 assert(cache_size >= (mb->offset + mb->length));
                 /*
-                 * cache_size is only reduced with chunkmap_lock_43
-                 * held and we are holding the chunkmap_lock_43, so
-                 * it cannot be reduced by some other thread, but
-                 * it can be increased by some other thread as
-                 * set_uptodate() does not need chunkmap_lock_43.
-                 * Try to set it to this mb's right edge unless
-                 * someone wants to increase it.
+                 * cache_size is only reduced by truncate() and truncates
+                 * are serialized by the VFS inode lock, so only one truncate
+                 * can be ongoing, thus we are guaranteed that cache_size
+                 * cannot be reduced. Also, since no new writes will be sent
+                 * by fuse, no calls to set_uptodate() could be ongoing and
+                 * hence cache_size won't be increased either.
                  */
                 uint64_t expected = cache_size;
-                cache_size.compare_exchange_strong(expected, mb->offset + mb->length);
-                assert(cache_size >= mb->offset + mb->length);
+                [[maybe_unused]]
+                const bool updated =
+                    cache_size.compare_exchange_strong(expected, mb->offset + mb->length);
+                assert(updated);
+                assert(cache_size == (mb->offset + mb->length));
+                cache_size_updated = true;
                 break;
             }
+        }
+
+        if (!cache_size_updated) {
+            uint64_t expected = cache_size;
+            [[maybe_unused]]
+            const bool updated =
+                cache_size.compare_exchange_strong(expected, 0);
+            assert(updated);
+            assert(cache_size == 0);
         }
     }
 
@@ -2320,6 +2263,9 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
 
     num_truncate++;
     num_truncate_g++;
+
+    AZLogVerbose("<Truncate {}> {}done, new cache_size: {}",
+                 trunc_len, post ? "POST " : "", cache_size.load());
 
     return bytes_truncated;
 }
@@ -3019,7 +2965,7 @@ static void cache_read(bytes_chunk_cache& cache,
 {
     std::vector<bytes_chunk> v;
 
-    AZLogVerbose("=====> cache_read({}, {})", offset.load(), offset.load()+length.load());
+    AZLogVerbose("=====> cache_read({}, {})", offset, offset+length);
     v = cache.get(offset, length);
     // At least one chunk.
     assert(v.size() >= 1);
@@ -3051,7 +2997,7 @@ static void cache_read(bytes_chunk_cache& cache,
     assert(total_length == length);
 
     AZLogVerbose("=====> cache_read({}, {}): vec={}",
-               offset.load(), offset.load()+length.load(), v.size());
+               offset, offset+length, v.size());
 }
 
 static void cache_write(bytes_chunk_cache& cache,
@@ -3061,7 +3007,7 @@ static void cache_write(bytes_chunk_cache& cache,
     std::vector<bytes_chunk> v;
     uint64_t l, r;
 
-    AZLogVerbose("=====> cache_write({}, {})", offset.load(), offset.load()+length.load());
+    AZLogVerbose("=====> cache_write({}, {})", offset, offset+length);
     v = cache.getx(offset, length, &l, &r);
     // At least one chunk.
     assert(v.size() >= 1);
@@ -3095,8 +3041,8 @@ static void cache_write(bytes_chunk_cache& cache,
     assert(total_length == length);
 
     AZLogVerbose("=====> cache_write({}, {}): l={} r={} vec={}",
-                 offset.load(), offset.load()+length.load(), l, r, v.size());
-    AZLogVerbose("=====> cache_release({}, {})", offset.load(), offset.load()+length.load());
+                 offset, offset+length, l, r, v.size());
+    AZLogVerbose("=====> cache_release({}, {})", offset, offset+length);
     assert(cache.release(offset, length) <= length);
 }
 
