@@ -894,23 +894,23 @@ void fcsm::on_commit_complete(uint64_t commit_bytes)
             assert(tgt.task->rpc_api->write_task.is_fe());
             assert(tgt.task->rpc_api->write_task.get_size() > 0);
 
-            AZLogInfo("[{}] [FCSM] completing blocking commit target: {}, "
-                      "committed_seq_num: {}, write task: [{}, {})",
-                      inode->get_fuse_ino(),
-                      tgt.commit_seq,
-                      committed_seq_num.load(),
-                      tgt.task->rpc_api->write_task.get_offset(),
-                      tgt.task->rpc_api->write_task.get_offset() +
-                      tgt.task->rpc_api->write_task.get_size());
+            AZLogDebug("[{}] [FCSM] completing blocking commit target: {}, "
+                       "committed_seq_num: {}, write task: [{}, {})",
+                       inode->get_fuse_ino(),
+                       tgt.commit_seq,
+                       committed_seq_num.load(),
+                       tgt.task->rpc_api->write_task.get_offset(),
+                       tgt.task->rpc_api->write_task.get_offset() +
+                       tgt.task->rpc_api->write_task.get_size());
 
             tgt.task->reply_write(
                     tgt.task->rpc_api->write_task.get_size());
         } else if (tgt.done) {
-            AZLogInfo("[{}] [FCSM] completing blocking commit target: {}, "
-                      "committed_seq_num: {}",
-                      inode->get_fuse_ino(),
-                      tgt.commit_seq,
-                      committed_seq_num.load());
+            AZLogDebug("[{}] [FCSM] completing blocking commit target: {}, "
+                       "committed_seq_num: {}",
+                       inode->get_fuse_ino(),
+                       tgt.commit_seq,
+                       committed_seq_num.load());
 
             assert(*tgt.done == false);
             *tgt.done = true;
@@ -1121,23 +1121,23 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
             assert(tgt.task->rpc_api->write_task.is_fe());
             assert(tgt.task->rpc_api->write_task.get_size() > 0);
 
-            AZLogInfo("[{}] [FCSM] completing blocking flush target: {}, "
-                      "flushed_seq_num: {}, write task: [{}, {})",
-                      inode->get_fuse_ino(),
-                      tgt.flush_seq,
-                      flushed_seq_num.load(),
-                      tgt.task->rpc_api->write_task.get_offset(),
-                      tgt.task->rpc_api->write_task.get_offset() +
-                      tgt.task->rpc_api->write_task.get_size());
+            AZLogDebug("[{}] [FCSM] completing blocking flush target: {}, "
+                       "flushed_seq_num: {}, write task: [{}, {})",
+                       inode->get_fuse_ino(),
+                       tgt.flush_seq,
+                       flushed_seq_num.load(),
+                       tgt.task->rpc_api->write_task.get_offset(),
+                       tgt.task->rpc_api->write_task.get_offset() +
+                       tgt.task->rpc_api->write_task.get_size());
 
             tgt.task->reply_write(
                     tgt.task->rpc_api->write_task.get_size());
         } else if (tgt.done) {
-            AZLogInfo("[{}] [FCSM] completing blocking flush target: {}, "
-                      "flushed_seq_num: {}",
-                      inode->get_fuse_ino(),
-                      tgt.flush_seq,
-                      flushed_seq_num.load());
+            AZLogDebug("[{}] [FCSM] completing blocking flush target: {}, "
+                       "flushed_seq_num: {}",
+                       inode->get_fuse_ino(),
+                       tgt.flush_seq,
+                       flushed_seq_num.load());
 
             assert(*tgt.done == false);
             *tgt.done = true;
