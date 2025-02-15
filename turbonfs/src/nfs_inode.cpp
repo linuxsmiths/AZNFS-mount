@@ -1532,6 +1532,25 @@ bool nfs_inode::truncate_start(size_t size)
      * read holding the membuf lock, so this time we call try_lock() on the
      * membuf(s).
      */
+
+    /*
+     * Since write calls are serialized with truncate, by VFS, we won't have
+     * any new fuse write requests coming. filecache_handle->truncate() call
+     * below can mark one or more membufs as truncated. These won't be picked
+     * for flushing and any flush/commit target/tasks waiting on those will
+     * never complete. If truncate() is allowed to run alongside FCSM, then
+     * it can change the flushable/committable data while the state machine
+     * is running. This complicates handling, so before calling truncate()
+     * we complete all the flush/commit targets. If there are no targets the
+     * FCSM need not have to run and hence we can avoid truncate() racing
+     * with FCSM.
+     */
+    flush_lock();
+    get_fcsm()->ftgtq_cleanup();
+    // TODO: Review for commit.
+    //get_fcsm()->ctgtq_cleanup();
+    flush_unlock();
+
     [[maybe_unused]]
     const uint64_t bytes_truncated = filecache_handle->truncate(size, false /* post */);
 
@@ -1539,7 +1558,7 @@ bool nfs_inode::truncate_start(size_t size)
                "(bytes truncated: {})",
                ino, size, bytes_truncated);
 
-#if 1
+#if 0
     /*
      * Now flush+commit the non-truncated part of the cache.
      * We should be able to avoid this step, but we do it for robustness and

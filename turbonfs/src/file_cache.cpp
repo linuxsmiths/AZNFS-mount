@@ -2023,11 +2023,11 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
 
     assert(trunc_len <= AZNFSC_MAX_FILE_SIZE);
 
-    AZLogVerbose("[{}] <Truncate {}> {}called [S: {}, C: {}, CS: {}]"
-                 CACHE_TAG, trunc_len, post ? "POST " : "",
-                 inode->get_server_file_size(),
-                 inode->get_client_file_size(),
-                 inode->get_cached_filesize());
+    AZLogDebug("[{}] <Truncate {}> {}called [S: {}, C: {}, CS: {}]",
+               CACHE_TAG, trunc_len, post ? "POST " : "",
+               inode->get_server_file_size(),
+               inode->get_client_file_size(),
+               inode->get_cached_filesize());
     /*
      * Count of how many bytes we drop from the cache, to serve this truncate
      * request. We return this to the caller.
@@ -2158,11 +2158,11 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
                 const uint64_t trim_bytes = (bc.offset + bc.length - trunc_len);
                 assert(trim_bytes > 0);
 
-                AZLogVerbose("[{}] <Truncate {}> {}trimming chunk from right "
-                             "[{},{}) -> [{},{})", CACHE_TAG,
-                             trunc_len, post ? "POST " : "",
-                             bc.offset, bc.offset + bc.length,
-                             bc.offset, trunc_len);
+                AZLogDebug("[{}] <Truncate {}> {}trimming chunk from right "
+                           "[{},{}) -> [{},{})", CACHE_TAG,
+                           trunc_len, post ? "POST " : "",
+                           bc.offset, bc.offset + bc.length,
+                           bc.offset, trunc_len);
 
                 // Trim chunkmap bc.
                 bc.length -= trim_bytes;
@@ -2187,9 +2187,9 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
                 mb->clear_locked();
                 mb->clear_inuse();
             } else {
-                AZLogVerbose("[{}] <Truncate {}> {}truncated full chunk [{},{})",
-                             trunc_len, post ? "POST " : "", CACHE_TAG,
-                             bc.offset, bc.offset + bc.length);
+                AZLogDebug("[{}] <Truncate {}> {}truncated full chunk [{},{})",
+                           CACHE_TAG, trunc_len, post ? "POST " : "",
+                           bc.offset, bc.offset + bc.length);
 
                 /*
                  * Release the chunk.
@@ -2269,9 +2269,10 @@ uint64_t bytes_chunk_cache::truncate(uint64_t trunc_len, bool post)
     num_truncate++;
     num_truncate_g++;
 
-    AZLogVerbose("[{}] <Truncate {}> {}done, new cache_size: {}",
-                 CACHE_TAG,
-                 trunc_len, post ? "POST " : "", cache_size.load());
+    AZLogDebug("[{}] <Truncate {}> {}done, cache_size: {}, bytes_uptodate: {}",
+               CACHE_TAG,
+               trunc_len, post ? "POST " : "",
+               cache_size.load(), bytes_uptodate.load());
 
     return bytes_truncated;
 }
