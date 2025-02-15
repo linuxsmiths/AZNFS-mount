@@ -223,6 +223,7 @@ public:
      * cause a commit and those targets would never normally complete.
      */
     void ctgtq_cleanup();
+    void ftgtq_cleanup();
 
 private:
     /*

@@ -1535,7 +1535,7 @@ bool nfs_inode::truncate_start(size_t size)
                "(bytes truncated: {})",
                ino, size, bytes_truncated);
 
-#if 0
+#if 1
     /*
      * Now flush+commit the non-truncated part of the cache.
      * We should be able to avoid this step, but we do it for robustness and
@@ -1571,6 +1571,14 @@ bool nfs_inode::truncate_start(size_t size)
     wait_for_ongoing_flush();
 
     AZLogDebug("[{}] Ongoing flush operations completed", ino);
+
+    /*
+     * Now we have flushed+committed all the dirty data, so no more flush
+     * commit targets would be completed, complete them now.
+     */
+    get_fcsm()->ftgtq_cleanup();
+    // TODO: Verify for unstable writes.
+    //get_fcsm()->ctgtq_cleanup();
 
     /*
      * Invalidate attribute cache for the inode as a successful truncate call

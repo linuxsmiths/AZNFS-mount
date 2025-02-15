@@ -339,6 +339,45 @@ void fcsm::ctgtq_cleanup()
     assert(ctgtq.empty());
 }
 
+void fcsm::ftgtq_cleanup()
+{
+    assert(inode->is_flushing);
+    // TODO: Verify this.
+    assert(inode->is_stable_write());
+
+    AZLogDebug("[FCSM][{}] ftgtq_cleanup()", inode->get_fuse_ino());
+
+    while (!ftgtq.empty()) {
+        struct fctgt &ftgt = ftgtq.front();
+        assert(ftgt.fcsm == this);
+
+        struct rpc_task *task = ftgt.task;
+        if (task) {
+            /*
+             * ftgtq_cleanup() is called when file is truncated and we have
+             * flushed all existing dirty bytes. No more flush callback would
+             * be called so we have to complete all the flush targets now.
+             */
+            assert(task->magic == RPC_TASK_MAGIC);
+            assert(task->get_op_type() == FUSE_WRITE);
+            assert(task->rpc_api->write_task.is_fe());
+            assert(task->rpc_api->write_task.get_size() > 0);
+
+            task->reply_write(task->rpc_api->write_task.get_size());
+        }
+
+        AZLogInfo("[FCSM][{}] ftgtq_cleanup(): completed write task: {} "
+                  "flush_seq: {}",
+                  inode->get_fuse_ino(),
+                  fmt::ptr(task),
+                  ftgt.flush_seq);
+
+        ftgtq.pop();
+    }
+
+    assert(ftgtq.empty());
+}
+
 void fcsm::ensure_commit(uint64_t write_off,
                          uint64_t write_len,
                          struct rpc_task *task,
@@ -1174,6 +1213,7 @@ void fcsm::on_flush_complete(uint64_t flush_bytes)
          */
         assert(!bc_vec.empty());
         // We should flush all the dirty data in the chunkmap.
+        [[maybe_unused]]
         const uint64_t next_goal =
             std::max((ftgtq.empty() ? 0 : ftgtq.front().flush_seq),
                      (ctgtq.empty() ? 0 : ctgtq.front().commit_seq));

@@ -3396,6 +3396,7 @@ void rpc_task::run_read()
 
     [[maybe_unused]] size_t total_length = 0;
     bool found_in_cache = true;
+    [[maybe_unused]]
     bool hole_in_cache = false;
 
     num_ongoing_backend_reads = 1;
