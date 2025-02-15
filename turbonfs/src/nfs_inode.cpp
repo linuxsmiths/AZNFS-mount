@@ -791,9 +791,15 @@ void nfs_inode::sync_membufs(std::vector<bytes_chunk> &bc_vec,
         if (mb->is_flushing() ||
             !mb->is_dirty() ||
             mb->is_truncated()) {
+
+            if (mb->is_truncated()) {
+                AZLogInfo("[{}] sync_membufs: skipping truncated membuf "
+                          "[{}, {})", get_fuse_ino(), mb->offset.load(),
+                          mb->offset.load()+mb->length.load());
+            }
+
             mb->clear_locked();
             mb->clear_inuse();
-
             continue;
         }
 

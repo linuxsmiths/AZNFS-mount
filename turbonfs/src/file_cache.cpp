@@ -2773,6 +2773,9 @@ bytes_chunk_cache::get_commit_pending_bcs(uint64_t *bytes) const
         struct membuf *mb = bc.get_membuf();
 
         if (mb->is_commit_pending()) {
+            // TODO: Handle truncated membufs.
+            assert(!mb->is_truncated());
+
             mb->set_inuse();
             [[maybe_unused]]
             const bool need_not_wait_for_lock = mb->set_locked();
@@ -2845,7 +2848,14 @@ std::vector<bytes_chunk> bytes_chunk_cache::get_contiguous_dirty_bcs(
         const struct bytes_chunk& bc = it->second;
         struct membuf *mb = bc.get_membuf();
 
-        if (mb->is_dirty() && !mb->is_flushing()) {
+        assert(bc.offset == mb->offset);
+        assert(bc.length == mb->length);
+
+        /*
+         * We don't want to flush membufs which are already flushing or which
+         * are truncated.
+         */
+        if (mb->is_dirty() && !mb->is_flushing() && !mb->is_truncated()) {
             if ((next_offset != AZNFSC_BAD_OFFSET) &&
                 (next_offset != bc.offset)) {
                 // 1st non contiguous bc found, break.
@@ -2912,7 +2922,14 @@ std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_nonflushing_bcs_range(
         const struct bytes_chunk& bc = it->second;
         struct membuf *mb = bc.get_membuf();
 
-        if (mb->is_dirty() && !mb->is_flushing()) {
+        assert(bc.offset == mb->offset);
+        assert(bc.length == mb->length);
+
+        /*
+         * We don't want to flush membufs which are already flushing or which
+         * are truncated.
+         */
+        if (mb->is_dirty() && !mb->is_flushing() && !mb->is_truncated()) {
             mb->set_inuse();
             bc_vec.emplace_back(bc);
 
@@ -2941,7 +2958,14 @@ std::vector<bytes_chunk> bytes_chunk_cache::get_dirty_bc_range(
         const struct bytes_chunk& bc = it->second;
         struct membuf *mb = bc.get_membuf();
 
-        if (mb->is_dirty()) {
+        assert(bc.offset == mb->offset);
+        assert(bc.length == mb->length);
+
+        /*
+         * Caller won't be interested in dirty membufs which arre truncated
+         * as they cannot be flushed.
+         */
+        if (mb->is_dirty() && !mb->is_truncated()) {
             mb->set_inuse();
             bc_vec.emplace_back(bc);
         }
