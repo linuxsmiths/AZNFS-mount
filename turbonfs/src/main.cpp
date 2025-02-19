@@ -409,7 +409,7 @@ int get_authinfo_data(struct auth_info& auth_info)
         return -1;
     }
     
-    const std::string output = run_command("az account show --output json");
+    std::string output = run_command("az account show --output json");
     if (output.empty()) {
         AZLogError("'az account show --output json' failed to get auth data");
         return -1;
@@ -417,7 +417,7 @@ int get_authinfo_data(struct auth_info& auth_info)
 
     // Extract tenantid, subscriptionid, and user details from the output json.
     try {
-        const auto json_data = json::parse(output);
+        auto json_data = json::parse(output);
 
         auth_info.tenantid = json_data["tenantId"].get<std::string>();
         auth_info.subscriptionid = json_data["id"].get<std::string>();
@@ -429,28 +429,26 @@ int get_authinfo_data(struct auth_info& auth_info)
     }
 
     const std::string command = "az resource list -n " + account_name;
-    const std::string output1 = run_command(command);
-    if (output1.empty()) {
+   output = run_command(command);
+    if (output.empty()) {
         AZLogError("'az resource list -n {}' failed to get auth data", account_name);
         return -1;
     }
 
-    AZLogDebug("Output {}", output1);
-
     // Extract resource group from the output json.
     try {
-        const auto json_data1 = json::parse(output1);
+        json_data = json::parse(output);
 
-        auth_info.resourcegroupname = json_data1[0]["resourceGroup"];
+        auth_info.resourcegroupname = json_data[0]["resourceGroup"];
     } catch (json::parse_error& ev) {
-        AZLogError("Failed to parse json: {}, error: {}", output1, ev.what());
+        AZLogError("Failed to parse json: {}, error: {}", output, ev.what());
         return -1;
     }
 
     // Caller expects valid values for tenantid, subscriptionid and resourcegroupname.
     if (auth_info.tenantid.empty() || auth_info.subscriptionid.empty() 
         || auth_info.resourcegroupname.empty()) {
-        AZLogError("'az account show --output json' returned: "
+        AZLogError("Authdata parameters returned from azcli commands: "
                    "tenantid: {} subscriptionid: {} username: {} "
                    "usertype: {} resourcegroupname: {}",
                    auth_info.tenantid,
@@ -461,7 +459,7 @@ int get_authinfo_data(struct auth_info& auth_info)
         return -1;
     }
 
-    AZLogDebug("'az account show --output json' returned: "
+    AZLogDebug("Authdata parameters returned from azcli commands: "
                "tenantid: {} subscriptionid: {} username: {} "
                "usertype: {} resourcegroupname: {}",
                auth_info.tenantid,
@@ -552,6 +550,7 @@ auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth)
         {"AuthToken", token.Token},
         {"SubscriptionId", auth_info.subscriptionid},
         {"TenantId", auth_info.tenantid},
+        {"ResourceGroupName", auth_info.resourcegroupname},
         {"AuthorizedTill", std::to_string(expirytime)}
     };
 
