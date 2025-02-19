@@ -32,9 +32,6 @@ struct fuse_conn_info_opts* fuse_conn_info_opts_ptr;
 // It is set when the user is enabled auth in config but they have not done 'az login'.
 bool is_azlogin_required = false; 
 
-// It is set if auth in enabled for the account, used in get_authinfo_data to get RG name. 
-std::string account_name = "";
-
 // LogFile for this mount.
 const string optdirdata = "/opt/microsoft/aznfs/data";
 
@@ -404,7 +401,7 @@ close_pipe:
 
 int get_authinfo_data(struct auth_info& auth_info)
 {
-    if (account_name.empty()) {
+    if (aznfsc_cfg.account.empty()) {
         AZLogError("Account name not set, failed to get auth data");
         return -1;
     }
@@ -428,10 +425,10 @@ int get_authinfo_data(struct auth_info& auth_info)
         return -1;
     }
 
-    const std::string command = "az resource list -n " + account_name;
+    const std::string command = "az resource list -n " + aznfsc_cfg.account;
    output = run_command(command);
     if (output.empty()) {
-        AZLogError("'az resource list -n {}' failed to get auth data", account_name);
+        AZLogError("'az resource list -n {}' failed to get auth data", aznfsc_cfg.account);
         return -1;
     }
 
@@ -751,7 +748,6 @@ int main(int argc, char *argv[])
 
     if (aznfsc_cfg.auth) {
         // Set the auth token callback for this connection if auth is enabled.
-        account_name = aznfsc_cfg.account;
         set_auth_token_callback(get_auth_token_and_setargs_cb);
     }
 
