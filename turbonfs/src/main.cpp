@@ -32,6 +32,9 @@ struct fuse_conn_info_opts* fuse_conn_info_opts_ptr;
 // It is set when the user is enabled auth in config but they have not done 'az login'.
 bool is_azlogin_required = false; 
 
+// It is set if auth in enabled for the account, used in get_authinfo_data to get RG name. 
+std::string account_name = "";
+
 // LogFile for this mount.
 const string optdirdata = "/opt/microsoft/aznfs/data";
 
@@ -52,6 +55,7 @@ struct auth_info
     std::string subscriptionid;
     std::string username;
     std::string usertype;
+    std::string resourcegroupname;
 };
 
 void aznfsc_help(const char *argv0)
@@ -400,6 +404,11 @@ close_pipe:
 
 int get_authinfo_data(struct auth_info& auth_info)
 {
+    if (account_name.empty()) {
+        AZLogError("Account name not set, failed to get auth data");
+        return -1;
+    }
+    
     const std::string output = run_command("az account show --output json");
     if (output.empty()) {
         AZLogError("'az account show --output json' failed to get auth data");
@@ -419,23 +428,47 @@ int get_authinfo_data(struct auth_info& auth_info)
         return -1;
     }
 
-    // Caller expects valid values for tenantid and subscriptionid.
-    if (auth_info.tenantid.empty() || auth_info.subscriptionid.empty()) {
+    const std::string command = "az resource list -n " + account_name;
+    const std::string output1 = run_command(command);
+    if (output1.empty()) {
+        AZLogError("'az resource list -n {}' failed to get auth data", account_name);
+        return -1;
+    }
+
+    AZLogDebug("Output {}", output1);
+
+    // Extract resource group from the output json.
+    try {
+        const auto json_data1 = json::parse(output1);
+
+        auth_info.resourcegroupname = json_data1[0]["resourceGroup"];
+    } catch (json::parse_error& ev) {
+        AZLogError("Failed to parse json: {}, error: {}", output1, ev.what());
+        return -1;
+    }
+
+    // Caller expects valid values for tenantid, subscriptionid and resourcegroupname.
+    if (auth_info.tenantid.empty() || auth_info.subscriptionid.empty() 
+        || auth_info.resourcegroupname.empty()) {
         AZLogError("'az account show --output json' returned: "
-                   "tenantid: {} subscriptionid: {} username: {} usertype: {}",
+                   "tenantid: {} subscriptionid: {} username: {} "
+                   "usertype: {} resourcegroupname: {}",
                    auth_info.tenantid,
                    auth_info.subscriptionid,
                    auth_info.username,
-                   auth_info.usertype);
+                   auth_info.usertype,
+                   auth_info.resourcegroupname);
         return -1;
     }
 
     AZLogDebug("'az account show --output json' returned: "
-               "tenantid: {} subscriptionid: {} username: {} usertype: {}",
+               "tenantid: {} subscriptionid: {} username: {} "
+               "usertype: {} resourcegroupname: {}",
                auth_info.tenantid,
                auth_info.subscriptionid,
                auth_info.username,
-               auth_info.usertype);
+               auth_info.usertype,
+               auth_info.resourcegroupname);
 
     return 0;
 }
@@ -719,6 +752,7 @@ int main(int argc, char *argv[])
 
     if (aznfsc_cfg.auth) {
         // Set the auth token callback for this connection if auth is enabled.
+        account_name = aznfsc_cfg.account;
         set_auth_token_callback(get_auth_token_and_setargs_cb);
     }
 
