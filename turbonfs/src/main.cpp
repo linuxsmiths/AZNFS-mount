@@ -401,12 +401,10 @@ close_pipe:
 
 int get_authinfo_data(struct auth_info& auth_info)
 {
-    if (aznfsc_cfg.account.empty()) {
-        AZLogError("Account name not set, failed to get auth data");
-        return -1;
-    }
-    
-    std::string output = run_command("az account show --output json");
+    // We should not be here without a valid account. 
+    assert(!aznfsc_cfg.account.empty());
+
+    const std::string output = run_command("az account show --output json");
     if (output.empty()) {
         AZLogError("'az account show --output json' failed to get auth data");
         return -1;
@@ -414,7 +412,7 @@ int get_authinfo_data(struct auth_info& auth_info)
 
     // Extract tenantid, subscriptionid, and user details from the output json.
     try {
-        auto json_data = json::parse(output);
+        const auto json_data = json::parse(output);
 
         auth_info.tenantid = json_data["tenantId"].get<std::string>();
         auth_info.subscriptionid = json_data["id"].get<std::string>();
@@ -426,7 +424,7 @@ int get_authinfo_data(struct auth_info& auth_info)
     }
 
     const std::string command = "az resource list -n " + aznfsc_cfg.account;
-   output = run_command(command);
+    const std::string output = run_command(command);
     if (output.empty()) {
         AZLogError("'az resource list -n {}' failed to get auth data", aznfsc_cfg.account);
         return -1;
@@ -434,7 +432,7 @@ int get_authinfo_data(struct auth_info& auth_info)
 
     // Extract resource group from the output json.
     try {
-        json_data = json::parse(output);
+        const auto json_data = json::parse(output);
 
         auth_info.resourcegroupname = json_data[0]["resourceGroup"];
     } catch (json::parse_error& ev) {
@@ -505,10 +503,13 @@ auth_token_cb_res *get_auth_token_and_setargs_cb(struct auth_context *auth)
         return nullptr;
     }
 
-    AZLogInfo("get_auth_token_and_setargs_cb: tenantid: {} subscriptionid: {}", 
+    AZLogInfo("get_auth_token_and_setargs_cb: tenantid: {} subscriptionid: {} 
+               resourcegroupname: {}", 
                auth_info.tenantid.c_str(),
-               auth_info.subscriptionid.c_str());
+               auth_info.subscriptionid.c_str(),
+               auth_info.resourcegroupname.c_str());
 
+    assert(!auth_info.resourcegroupname.empty());
     assert(!auth_info.tenantid.empty());
     assert(!auth_info.subscriptionid.empty());
 
