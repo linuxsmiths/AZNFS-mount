@@ -883,6 +883,10 @@ void membuf::clear_inuse()
     AZLogDebug("[{}] Clearing inuse membuf [{}, {}), fd={}, new inuse count: {}",
                bcc->inode->get_fuse_ino(),
                offset.load(), offset.load()+length.load(), backing_file_fd, inuse.load());
+
+    if (inuse == 0 && deferred_for_release) {
+        bcc->release(offset, length);
+    }
 }
 
 bytes_chunk::bytes_chunk(bytes_chunk_cache *_bcc,
@@ -1619,6 +1623,8 @@ do { \
                              chunk_offset, chunk_offset + chunk_length,
                              bc->get_membuf()->get_inuse(),
                              bc->get_membuf()->is_dirty());
+
+                bc->get_membuf()->set_deferred_for_release();
             }
 
             // This chunk is fully consumed, move to the next chunk.
