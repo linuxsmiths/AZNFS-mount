@@ -437,6 +437,8 @@ int get_authinfo_data(struct auth_info& auth_info)
     const std::string out = run_command(command);
     if (out.empty()) {
         AZLogError("'{}' failed to get storage account details", command);
+        status_pipe_error_string = "Storage account " + std::string(aznfsc_cfg.account) + 
+                                   " not found in the subscription " + auth_info.subscriptionid;
         return -1;
     }
 
@@ -446,30 +448,6 @@ int get_authinfo_data(struct auth_info& auth_info)
 
         auth_info.resourcegroupname = json_data["resourceGroup"].get<std::string>();
 
-        /*
-         * Resource id is of the form: 
-         * /subscriptions/{sub_guid}/resourceGroups/{rg_guid}/providers/Microsoft.Storage/storageAccounts/{sa_name}
-         */ 
-        const std::string resource_id = json_data["id"].get<std::string>();
-        const std::string sub_prefix = "/subscriptions/";
-        size_t start = resource_id.find(sub_prefix);
-        std::string account_subid = "";
-        if (start != std::string::npos) {
-            start += sub_prefix.length();
-            size_t end = resource_id.find("/", start); 
-            account_subid = resource_id.substr(start, end - start);   
-        }
-
-        if (account_subid != auth_info.subscriptionid) {
-            status_pipe_error_string = "Logged in with incorrect subscription " +
-                          auth_info.subscriptionid +
-                          " please login again with " +
-                          account_subid +
-                          " subscription";
-
-            AZLogError("{}", status_pipe_error_string);
-            return -1;
-        }
     } catch (json::parse_error& ev) {
         AZLogError("Failed to parse json: {}, error: {}", out, ev.what());
         return -1;
@@ -892,7 +870,7 @@ err_out0:
                 ret = -3;
             }
             // TODO: Extend this with meaningful error codes.
-            pipe << ret << status_pipe_error_string << endl;
+            pipe << ret << " " << status_pipe_error_string << endl;
             status_pipe_closed = true;
         }
         return 1;
