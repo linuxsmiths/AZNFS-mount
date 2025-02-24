@@ -445,18 +445,17 @@ int get_authinfo_data(struct auth_info& auth_info)
     // Extract resource group from the output json.
     try {
         const auto json_data = json::parse(out);
-
         auth_info.resourcegroupname = json_data["resourceGroup"].get<std::string>();
-
     } catch (json::parse_error& ev) {
         AZLogError("Failed to parse json: {}, error: {}", out, ev.what());
         return -1;
     }
 
     // Caller expects valid values for tenantid, subscriptionid and resourcegroupname.
-    if (auth_info.tenantid.empty() || auth_info.subscriptionid.empty() 
+    if (auth_info.tenantid.empty() 
+        || auth_info.subscriptionid.empty() 
         || auth_info.resourcegroupname.empty()) {
-        AZLogError("Authdata parameters returned from azcli commands: "
+        AZLogError("Invalid authdata parameters returned from azcli commands: "
                    "tenantid: {} subscriptionid: {} username: {} "
                    "usertype: {} resourcegroupname: {}",
                    auth_info.tenantid,
@@ -866,11 +865,15 @@ err_out0:
             if (is_azlogin_required) {
                 ret = -2;
                 AZLogError("Not logged in using 'az login' when auth is enabled");
-            } else if (status_pipe_error_string != "") {
+                pipe << ret << endl;
+            } else if (status_pipe_error_string.empty()) {
                 ret = -3;
+                AZLogError("Returing error string '-3 {}' on the pipe", status_pipe_error_string);
+                pipe << "-3 " << status_pipe_error_string << endl;
+            } else {
+                // TODO: Extend this with meaningful error codes.
+                pipe << ret << endl;
             }
-            // TODO: Extend this with meaningful error codes.
-            pipe << ret << " " << status_pipe_error_string << endl;
             status_pipe_closed = true;
         }
         return 1;
@@ -884,5 +887,5 @@ err_out0:
         nfs_client::get_instance().shutdown();
     }
 
-    return (ret == 0) ? 1 : 0;
+    return ret ? 1 : 0;
 }
