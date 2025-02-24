@@ -956,7 +956,7 @@ aznfsclient_mount()
 
     #
     # Read from named pipe with timeout.
-    # aznfsclient will send an integral status followed by an optional error string.
+    # aznfsclient will send an integer status followed by an optional error string.
     #
     read -t 30 mount_status mount_str <> $MOUNT_STATUS_PIPE
 

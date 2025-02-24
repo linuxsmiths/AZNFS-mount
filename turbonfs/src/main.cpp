@@ -28,13 +28,17 @@ struct fuse_conn_info_opts* fuse_conn_info_opts_ptr;
  */
 #define AZNFSC_OPT(templ, key) { templ, offsetof(struct aznfsc_cfg, key), 0}
 
-// Is 'az login' required?
-// It is set when the user has enabled auth in config but they have not done 'az login'.
+/*
+ * Is 'az login' required?
+ * It is set when the user has enabled auth in config but they have not done 'az login'.
+ */ 
 bool is_azlogin_required = false; 
 
-// Stores the error string for incorrect subscription.
-// Used only if user has enabled auth in config. 
-std::string error_string = "";
+/*
+ * Stores the error string for incorrect subscription.
+ * Used only if user has enabled auth in config. 
+ */ 
+std::string status_pipe_error_string;
 
 // LogFile for this mount.
 const string optdirdata = "/opt/microsoft/aznfs/data";
@@ -429,8 +433,8 @@ int get_authinfo_data(struct auth_info& auth_info)
         return -1;
     }
 
-    //const std::string command = std::string("az resource list -n ") + std::string(aznfsc_cfg.account);
-    const std::string command = std::string("az resource list -n ") + "pgandhisa";
+    const std::string command = std::string("az storage account show -n ") + "pgandhisa";
+    //const std::string command = std::string("az storage account show -n ") + std::string(aznfsc_cfg.account);
     const std::string out = run_command(command);
     if (out.empty()) {
         AZLogError("{} failed to get auth data", command);
@@ -441,8 +445,8 @@ int get_authinfo_data(struct auth_info& auth_info)
     try {
         const auto json_data = json::parse(out);
 
-        auth_info.resourcegroupname = json_data[0]["resourceGroup"];
-        const std::string account_string = json_data[0]["id"];
+        auth_info.resourcegroupname = json_data["resourceGroup"].get<std::string>();
+        const std::string account_string = json_data["id"].get<std::string>();
         std::string sub_prefix = "/subscriptions/";
         size_t start = account_string.find(sub_prefix);
         std::string account_subid = "";
@@ -452,14 +456,14 @@ int get_authinfo_data(struct auth_info& auth_info)
             account_subid= account_string.substr(start, end - start);   
         }
 
-        if ("account_subid" != auth_info.subscriptionid) {
-            error_string = "Logged in with incorrect subscription " +
+        if (account_subid != auth_info.subscriptionid) {
+            status_pipe_error_string = "Logged in with incorrect subscription " +
                           auth_info.subscriptionid +
                           " please login again with " +
                           account_subid +
                           " subscription";
 
-            AZLogError("{}", error_string);
+            AZLogError("{}", status_pipe_error_string);
             return -1;
         }
     } catch (json::parse_error& ev) {
@@ -880,8 +884,8 @@ err_out0:
             if (is_azlogin_required) {
                 ret = "-2";
                 AZLogError("Not logged in using 'az login' when auth is enabled");
-            } else if (error_string != "") {
-                ret = "-3 " + error_string;
+            } else if (status_pipe_error_string != "") {
+                ret = "-3 " + status_pipe_error_string;
             }
             // TODO: Extend this with meaningful error codes.
             pipe << ret << endl;
