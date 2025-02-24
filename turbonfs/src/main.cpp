@@ -35,9 +35,8 @@ struct fuse_conn_info_opts* fuse_conn_info_opts_ptr;
 bool is_azlogin_required = false; 
 
 /*
- * Stores the error string for incorrect subscription.
- * Used only if user has enabled auth in config. 
- */ 
+ * Stores the error string to be returned to the mount program over the status pipe.
+ */
 std::string status_pipe_error_string;
 
 // LogFile for this mount.
@@ -412,7 +411,7 @@ int get_authinfo_data(struct auth_info& auth_info)
     // We should not be here without a valid account. 
     assert(aznfsc_cfg.account != nullptr);
 
-    const std::string output = run_command("az account show --output json");
+    std::string output = run_command("az account show --output json");
     if (output.empty()) {
         AZLogError("'az account show --output json' failed to get account details");
         // User is required to perform 'az login'.
@@ -434,27 +433,27 @@ int get_authinfo_data(struct auth_info& auth_info)
     }
 
     const std::string command = std::string("az storage account show -n ") + std::string(aznfsc_cfg.account);
-    const std::string out = run_command(command);
-    if (out.empty()) {
+    output = run_command(command);
+    if (output.empty()) {
         AZLogError("'{}' failed to get storage account details", command);
-        status_pipe_error_string = "Storage account " + std::string(aznfsc_cfg.account) + 
-                                   " not found in the subscription " + auth_info.subscriptionid;
+        status_pipe_error_string = "Storage account '" + std::string(aznfsc_cfg.account) + 
+                                   "' not found in the subscription " + auth_info.subscriptionid;
         return -1;
     }
 
     // Extract resource group from the output json.
     try {
-        const auto json_data = json::parse(out);
+        const auto json_data = json::parse(output);
         auth_info.resourcegroupname = json_data["resourceGroup"].get<std::string>();
     } catch (json::parse_error& ev) {
-        AZLogError("Failed to parse json: {}, error: {}", out, ev.what());
+        AZLogError("Failed to parse json: {}, error: {}", output, ev.what());
         return -1;
     }
 
     // Caller expects valid values for tenantid, subscriptionid and resourcegroupname.
-    if (auth_info.tenantid.empty() 
-        || auth_info.subscriptionid.empty() 
-        || auth_info.resourcegroupname.empty()) {
+    if (auth_info.tenantid.empty() ||
+        auth_info.subscriptionid.empty() ||
+        auth_info.resourcegroupname.empty()) {
         AZLogError("Invalid authdata parameters returned from azcli commands: "
                    "tenantid: {} subscriptionid: {} username: {} "
                    "usertype: {} resourcegroupname: {}",
@@ -866,7 +865,7 @@ err_out0:
                 ret = -2;
                 AZLogError("Not logged in using 'az login' when auth is enabled");
                 pipe << ret << endl;
-            } else if (status_pipe_error_string.empty()) {
+            } else if (!status_pipe_error_string.empty()) {
                 ret = -3;
                 AZLogError("Returing error string '-3 {}' on the pipe", status_pipe_error_string);
                 pipe << "-3 " << status_pipe_error_string << endl;
