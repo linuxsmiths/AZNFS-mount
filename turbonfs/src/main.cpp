@@ -446,8 +446,10 @@ int get_authinfo_data(struct auth_info& auth_info)
 
         auth_info.resourcegroupname = json_data["resourceGroup"].get<std::string>();
 
-        // Resource id is of the form: 
-        // /subscriptions/7bb33dc9-b004-4fb6-96af-df9bcc1c222b/resourceGroups/prag09-rg/providers/Microsoft.Storage/storageAccounts/pgandhisa
+        /*
+         * Resource id is of the form: 
+         * /subscriptions/{sub_guid}/resourceGroups/{rg_guid}/providers/Microsoft.Storage/storageAccounts/{sa_name}
+         */ 
         const std::string resource_id = json_data["id"].get<std::string>();
         const std::string sub_prefix = "/subscriptions/";
         size_t start = resource_id.find(sub_prefix);
@@ -455,7 +457,7 @@ int get_authinfo_data(struct auth_info& auth_info)
         if (start != std::string::npos) {
             start += sub_prefix.length();
             size_t end = resource_id.find("/", start); 
-            account_subid= resource_id.substr(start, end - start);   
+            account_subid = resource_id.substr(start, end - start);   
         }
 
         if (account_subid != auth_info.subscriptionid) {
