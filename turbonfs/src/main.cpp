@@ -414,7 +414,7 @@ int get_authinfo_data(struct auth_info& auth_info)
 
     const std::string output = run_command("az account show --output json");
     if (output.empty()) {
-        AZLogError("'az account show --output json' failed to get auth data");
+        AZLogError("'az account show --output json' failed to get account details");
         // User is required to perform 'az login'.
         is_azlogin_required = true;
         return -1;
@@ -433,11 +433,10 @@ int get_authinfo_data(struct auth_info& auth_info)
         return -1;
     }
 
-    const std::string command = std::string("az storage account show -n ") + "pgandhisa";
-    //const std::string command = std::string("az storage account show -n ") + std::string(aznfsc_cfg.account);
+    const std::string command = std::string("az storage account show -n ") + std::string(aznfsc_cfg.account);
     const std::string out = run_command(command);
     if (out.empty()) {
-        AZLogError("{} failed to get auth data", command);
+        AZLogError("'{}' failed to get storage account details", command);
         return -1;
     }
 
@@ -446,14 +445,17 @@ int get_authinfo_data(struct auth_info& auth_info)
         const auto json_data = json::parse(out);
 
         auth_info.resourcegroupname = json_data["resourceGroup"].get<std::string>();
-        const std::string account_string = json_data["id"].get<std::string>();
-        std::string sub_prefix = "/subscriptions/";
-        size_t start = account_string.find(sub_prefix);
+
+        // Resource id is of the form: 
+        // /subscriptions/7bb33dc9-b004-4fb6-96af-df9bcc1c222b/resourceGroups/prag09-rg/providers/Microsoft.Storage/storageAccounts/pgandhisa
+        const std::string resource_id = json_data["id"].get<std::string>();
+        const std::string sub_prefix = "/subscriptions/";
+        size_t start = resource_id.find(sub_prefix);
         std::string account_subid = "";
         if (start != std::string::npos) {
             start += sub_prefix.length();
-            size_t end = account_string.find("/", start); 
-            account_subid= account_string.substr(start, end - start);   
+            size_t end = resource_id.find("/", start); 
+            account_subid= resource_id.substr(start, end - start);   
         }
 
         if (account_subid != auth_info.subscriptionid) {
@@ -623,7 +625,7 @@ int main(int argc, char *argv[])
     struct fuse_session *se = NULL;
     struct fuse_cmdline_opts opts;
     struct fuse_loop_config *loop_config = fuse_loop_cfg_create();
-    std::string ret = "-1";
+    int ret = -1;
     bool client_started = false;
     int wait_iter;
     std::string log_file_name;
@@ -673,12 +675,12 @@ int main(int argc, char *argv[])
         aznfsc_help(argv[0]);
         fuse_cmdline_help();
         fuse_lowlevel_help();
-        ret = "0";
+        ret = 0;
         goto err_out1;
     } else if (opts.show_version) {
         printf("FUSE library version %s\n", fuse_pkgversion());
         fuse_lowlevel_version();
-        ret = "0";
+        ret = 0;
         goto err_out1;
     }
 
@@ -809,13 +811,13 @@ int main(int argc, char *argv[])
     }
 
     if (opts.singlethread) {
-        ret = std::to_string(fuse_session_loop(se));
+        ret = fuse_session_loop(se);
     } else {
         fuse_loop_cfg_set_clone_fd(loop_config, opts.clone_fd);
         fuse_loop_cfg_set_max_threads(loop_config, opts.max_threads);
         fuse_loop_cfg_set_idle_threads(loop_config, opts.max_idle_threads);
 
-        ret = std::to_string(fuse_session_loop_mt(se, loop_config));
+        ret = fuse_session_loop_mt(se, loop_config);
     }
 
     /*
@@ -873,7 +875,7 @@ err_out1:
     free(opts.mountpoint);
     fuse_opt_free_args(&args);
 err_out0:
-    if (!status_pipe_closed && ret != "0") {
+    if (!status_pipe_closed && ret != 0) {
         // Open the pipe for writing.
         std::ofstream pipe(pipe_name);
 
@@ -882,13 +884,13 @@ err_out0:
         } else {
             // If is_azlogin_required is true, share the error code = -2 over the pipe.
             if (is_azlogin_required) {
-                ret = "-2";
+                ret = -2;
                 AZLogError("Not logged in using 'az login' when auth is enabled");
             } else if (status_pipe_error_string != "") {
-                ret = "-3 " + status_pipe_error_string;
+                ret = -3;
             }
             // TODO: Extend this with meaningful error codes.
-            pipe << ret << endl;
+            pipe << ret << status_pipe_error_string << endl;
             status_pipe_closed = true;
         }
         return 1;
@@ -902,5 +904,5 @@ err_out0:
         nfs_client::get_instance().shutdown();
     }
 
-    return (ret == "0") ? 1 : 0;
+    return (ret == 0) ? 1 : 0;
 }
