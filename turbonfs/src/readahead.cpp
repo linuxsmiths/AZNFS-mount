@@ -29,6 +29,11 @@ ra_state::ra_state(struct nfs_client *_client,
         //def_ra_size(std::min<uint64_t>(client->mnt_options.rsize_adj, ra_bytes))
         def_ra_size(std::min<uint64_t>(3 * 1024 * 1024, ra_bytes))
 {
+    /*
+     * Note: We use readahead IO size of 3MB to get more readahead data in
+     *       fewer calls.
+     */
+
     assert(client->magic == NFS_CLIENT_MAGIC);
     assert(inode->magic == NFS_INODE_MAGIC);
 
