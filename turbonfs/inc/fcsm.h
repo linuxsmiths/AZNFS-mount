@@ -96,7 +96,8 @@ public:
     void ensure_flush(uint64_t write_off,
                       uint64_t write_len,
                       struct rpc_task *task = nullptr,
-                      std::atomic<bool> *done = nullptr);
+                      std::atomic<bool> *done = nullptr,
+                      bool flush_full = false);
 
     /**
      * Ensure all or some commit-pending bytes are committed or scheduled for
@@ -262,7 +263,8 @@ private:
               uint64_t _flush_seq,
               uint64_t _commit_seq,
               struct rpc_task *_task = nullptr,
-              std::atomic<bool> *_done = nullptr);
+              std::atomic<bool> *_done = nullptr,
+              bool _commit_flush_all = false);
 
         /*
          * Flush and commit targets (in terms of flushed_seq_num/committed_seq_num)
@@ -288,6 +290,14 @@ private:
          * Pointer to the containing fcsm.
          */
         struct fcsm *const fcsm = nullptr;
+
+        /*
+         * commit/flush all dirty data, this is true
+         * when called from flush_cache_and_wait() at time of close
+         * of fd. If ensure_flush didn't find enough contiguous, then
+         * switch to stable writes.
+         */
+        bool commit_flush_all = false;
 #if 0
         /*
          * Has the required flush/commit task started?

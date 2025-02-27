@@ -1021,7 +1021,8 @@ int nfs_inode::copy_to_cache(const struct fuse_bufvec* bufv,
          * membuf remains uptodate after the copy.
          */
 try_copy:
-        if (bc.maps_full_membuf() || mb->is_uptodate()) {
+        if ((bc.maps_full_membuf() || mb->is_uptodate()) &&
+            !mb->is_commit_pending()) {
 
             assert(bc.length <= remaining);
             ::memcpy(bc.get_buffer(), buf, bc.length);
