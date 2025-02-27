@@ -26,12 +26,14 @@ fcsm::fctgt::fctgt(struct fcsm *fcsm,
                    uint64_t _flush_seq,
                    uint64_t _commit_seq,
                    struct rpc_task *_task,
-                   std::atomic<bool> *_done) :
+                   std::atomic<bool> *_done,
+                   bool _commit_flush_all) :
     flush_seq(_flush_seq),
     commit_seq(_commit_seq),
     task(_task),
     done(_done),
-    fcsm(fcsm)
+    fcsm(fcsm),
+    commit_flush_all(_commit_flush_all)
 {
     assert(fcsm->magic == FCSM_MAGIC);
     // At least one of flush/commit goals must be set.
@@ -357,8 +359,13 @@ void fcsm::ctgtq_cleanup()
 void fcsm::ftgtq_cleanup()
 {
     assert(inode->is_flushing);
+
+    #if 0
     // TODO: Verify this.
+    // From truncate start it called for both stable/unstable writes.
+    // So, removing this assert.
     assert(inode->is_stable_write());
+    #endif
 
     AZLogDebug("[FCSM][{}] ftgtq_cleanup()", inode->get_fuse_ino());
 
@@ -533,7 +540,8 @@ void fcsm::ensure_commit(uint64_t write_off,
                       0 /* target flush_seq */,
                       target_committed_seq_num /* target commit_seq */,
                       task,
-                      done);
+                      done,
+                      commit_full);
         return;
     }
 
@@ -559,7 +567,10 @@ void fcsm::ensure_commit(uint64_t write_off,
          * is flushed and committed.
          */
         ensure_flush(task ? task->rpc_api->write_task.get_offset() : 0,
-                     task ? task->rpc_api->write_task.get_size() : 0);
+                     task ? task->rpc_api->write_task.get_size() : 0,
+                     nullptr,
+                     nullptr,
+                     commit_full ? true : false);
 
         /*
          * ensure_flush() flushes *all* dirty data, so it must have scheduled
@@ -646,7 +657,8 @@ void fcsm::ensure_commit(uint64_t write_off,
 void fcsm::ensure_flush(uint64_t write_off,
                         uint64_t write_len,
                         struct rpc_task *task,
-                        std::atomic<bool> *done)
+                        std::atomic<bool> *done,
+                        bool flush_full)
 {
     assert(inode->is_flushing);
     /*
@@ -662,6 +674,7 @@ void fcsm::ensure_flush(uint64_t write_off,
     assert(is_running() || (ctgtq.empty() && ftgtq.empty()));
     assert(is_running() || (flushed_seq_num == flushing_seq_num));
     assert(is_running() || (committed_seq_num == committing_seq_num));
+    assert(!flush_full || !is_running());
 
     AZLogDebug("[{}] [FCSM] ensure_flush<{}> write req [{}, {}], task: {}, "
                "done: {}",
@@ -748,7 +761,8 @@ void fcsm::ensure_flush(uint64_t write_off,
                       target_flushed_seq_num /* target flush_seq */,
                       0 /* commit_seq */,
                       task,
-                      done);
+                      done,
+                      flush_full);
         return;
     }
 
@@ -787,6 +801,21 @@ void fcsm::ensure_flush(uint64_t write_off,
     }
     assert(bc_vec.empty() == (bytes == 0));
     assert(bytes > 0);
+
+    if (flush_full && bytes_to_flush > bytes) {
+        for (bytes_chunk& bc : bc_vec) {
+            struct membuf *mb = bc.get_membuf();
+            mb->clear_inuse();
+        }
+
+        assert(!inode->is_commit_in_progress());
+        assert(!inode->get_filecache()->is_flushing_in_progress());
+
+        bc_vec = inode->get_filecache()->get_dirty_nonflushing_bcs_range(
+            0, UINT64_MAX, &bytes);
+        assert(bytes >= bytes_to_flush);
+        inode->set_stable_write();
+    }
 
     /*
      * Kickstart the state machine.
