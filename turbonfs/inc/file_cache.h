@@ -436,6 +436,11 @@ struct membuf
      */
     void trim(uint64_t trim_len, bool left);
 
+    void set_deferred_for_release()
+    {
+        deferred_for_release = true;
+    }
+
 private:
     /*
      * Lock to correctly read and update the membuf state.
@@ -565,6 +570,13 @@ private:
      * writing the membuf.
      */
     std::atomic<uint32_t> inuse = 0;
+
+    /*
+     * This flag will be set when a release call avoids releasing the chunk
+     * due to inuse > 0. When inuse drops to 0 and if this flag is set,
+     * release() will be called to try and free this chunk.
+     */
+    std::atomic<bool> deferred_for_release = false;
 };
 
 /**
