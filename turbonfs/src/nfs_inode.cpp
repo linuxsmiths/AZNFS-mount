@@ -196,6 +196,8 @@ void nfs_inode::decref(size_t cnt, bool from_forget)
         last_forget_seen_usecs = get_current_usecs();
 #endif
 
+        assert((int64_t) (lookupcnt - cnt) >= (forget_expected - cnt));
+
         forget_expected -= cnt;
         assert(forget_expected >= 0);
     } else {
@@ -2094,8 +2096,8 @@ void nfs_inode::lookup_dircache(
                      * original dircachecnt ref held for each directory_entry
                      * added to dir_entries.
                      */
-                    entry->nfs_inode->forget_expected++;
                     entry->nfs_inode->incref();
+                    entry->nfs_inode->forget_expected++;
                     assert(entry->nfs_inode->dircachecnt >= 2);
                     entry->nfs_inode->dircachecnt--;
                 }
