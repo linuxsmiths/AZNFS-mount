@@ -201,7 +201,7 @@ void nfs_inode::decref(size_t cnt, bool from_forget)
          * 'forget_expected'. After that also 'lookupcnt' must have
          * 'forget_expected' or more refs.
          */
-        assert((int64_t) (lookupcnt - cnt) >= (forget_expected - cnt));
+        assert((lookupcnt - cnt) >= (uint64_t) (forget_expected - cnt));
 
         forget_expected -= cnt;
         assert(forget_expected >= 0);
@@ -212,7 +212,7 @@ void nfs_inode::decref(size_t cnt, bool from_forget)
          * forget_expected after lookupcnt and decrement before lookupcnt,
          * so it's safe to compare.
          */
-        assert((int64_t) (lookupcnt - cnt) >= forget_expected);
+        assert((lookupcnt - cnt) >= (uint64_t) forget_expected);
     }
 
 try_again:
@@ -2106,6 +2106,8 @@ void nfs_inode::lookup_dircache(
                      */
                     entry->nfs_inode->incref();
                     entry->nfs_inode->forget_expected++;
+                    assert(entry->nfs_inode->lookupcnt >=
+                            (uint64_t) entry->nfs_inode->forget_expected);
                     assert(entry->nfs_inode->dircachecnt >= 2);
                     entry->nfs_inode->dircachecnt--;
                 }
