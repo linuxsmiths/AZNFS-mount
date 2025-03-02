@@ -22,7 +22,7 @@ mkdir -p build && cd build
 if [ "$BUILD_TYPE" == "Debug" ]; then
     # tcmalloc doesn't play well with ASAN.
     TCMALLOC=OFF
-    PARANOID=ON
+    PARANOID=OFF
     INSECURE_AUTH_FOR_DEVTEST=ON
 else
     TCMALLOC=ON
