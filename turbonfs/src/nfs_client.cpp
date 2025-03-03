@@ -1671,19 +1671,18 @@ void nfs_client::setattr(
     struct nfs_inode *inode = get_nfs_inode_from_ino(ino);
 
     /*
-     * This is to satisfy a POSIX requirement which expects utime/stat to
-     * return updated attributes after sync'ing any pending writes.
-     * If there is lot of dirty data cached this might take very long, as
-     * it'll wait for the entire data to be written and acknowledged by the
-     * NFS server.
+     * See similar comment in nfs_client::getattr().
      *
-     * TODO: If it turns out to cause bad user experience, we can explore
-     *       updating nfs_inode::attr during cached writes and then returning
-     *       attributes from that instead of making a getattr call here.
-     *       We need to think carefully though.
+     * Note that fuse expects setattr() to return the updated attributes and
+     * it can then use those as fresh file attributes, so we have to do the
+     * flush-before-getattr logic even for the setattr call, else we may
+     * end up returning stale attributes for the case where file has lot of
+     * dirty data waiting to be flushed.
+     *
+     * TODO: Optimization for truncate case.
      */
     if (inode->is_regfile()) {
-        AZLogDebug("[{}] Flushing file data ahead of getattr",
+        AZLogDebug("[{}] Flushing file data ahead of setattr",
                    inode->get_fuse_ino());
         inode->flush_cache_and_wait();
     }

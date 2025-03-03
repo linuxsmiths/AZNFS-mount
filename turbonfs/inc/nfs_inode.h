@@ -325,7 +325,7 @@ private:
      * TODO: Set this to false once we have servers with unstable write
      *       support. Also uncomment the assert in nfs_inode constructor.
      */
-    bool stable_write = false;
+    bool stable_write = true;
 
     /*
      * XXX This is for debugging.

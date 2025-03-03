@@ -81,7 +81,14 @@ public:
      * dirty bytes to be flushed w/o having the application wait.
      *
      * ensure_flush() provides the following guarantees:
-     * - It'll flush *all* cached dirty bytes starting from the lowest offset.
+     * - For stable write, it'll flush *all* cached dirty bytes starting from
+     *   the lowest offset. More dirty data can be added, but that may not
+     *   necessarily be flushed, only what is returned by
+     *   get_dirty_nonflushing_bcs_range() at the time of the call.
+     * - For unstable write, it'll flush contiguous cached dirty bytes starting
+     *   from the lowest offset. If caller wants to flush *all* then they need
+     *   to pass 'flush_full_unstable'. If all dirty data is not contiguous,
+     *   then it'll involve switch to stable write.
      * - On completion of that flush:
      *   - If 'task' is non-null, it will be completed.
      *   - If 'done' is non-null, it will be set to true to signal completion.
@@ -97,7 +104,7 @@ public:
                       uint64_t write_len,
                       struct rpc_task *task = nullptr,
                       std::atomic<bool> *done = nullptr,
-                      bool flush_full = false);
+                      bool flush_full_unstable = false);
 
     /**
      * Ensure all or some commit-pending bytes are committed or scheduled for
@@ -264,7 +271,7 @@ private:
               uint64_t _commit_seq,
               struct rpc_task *_task = nullptr,
               std::atomic<bool> *_done = nullptr,
-              bool _commit_flush_all = false);
+              bool _commit_full = false);
 
         /*
          * Flush and commit targets (in terms of flushed_seq_num/committed_seq_num)
@@ -292,12 +299,12 @@ private:
         struct fcsm *const fcsm = nullptr;
 
         /*
-         * commit/flush all dirty data, this is true
-         * when called from flush_cache_and_wait() at time of close
-         * of fd. If ensure_flush didn't find enough contiguous, then
-         * switch to stable writes.
+         * commit *all* dirty data. This means for unstable writes, if all
+         * dirty data is not contiguous then we will switch to stable write.
+         * This is true only when ensure_commit() is called from
+         * flush_cache_and_wait().
          */
-        bool commit_flush_all = false;
+        bool commit_full = false;
 #if 0
         /*
          * Has the required flush/commit task started?
