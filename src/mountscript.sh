@@ -165,10 +165,29 @@ check_turbo_option()
     fi
 }
 
+validate_mount_point()
+{
+    local mount_point="$1"
+    if [ -z "$mount_point" ]; then
+        echo "Mount point cannot be empty"
+        return 1
+    elif [ ! -d "$mount_point" ]; then
+        echo "Mount point is not a valid directory"
+        return 1
+    fi
+}
+
 # [account.blob.core.windows.net:/account/container /mnt/aznfs -o rw,tcp,nolock,nconnect=16]
 vecho "Got arguments: [$*]"
 
 mount_point="$2"
+
+validate_mount_point "$mount_point"
+if [ $? -ne 0 ]; then
+    eecho "$nfs_vers"
+    eecho "Mount failed!"
+    exit 1
+fi
 
 OPTIONS=
 MOUNT_OPTIONS=

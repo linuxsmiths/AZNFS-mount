@@ -398,7 +398,7 @@ std::string run_command(const std::string& command)
 close_pipe:
     const int ret = ::pclose(pipe);
     if (ret != 0) {
-        AZLogError("Command failed with return code: {}, command: {}",
+        AZLogDebug("Command failed with return code: {}, command: {}",
                    ret, command);
         return "";
     }
@@ -613,6 +613,9 @@ int main(int argc, char *argv[])
     int wait_iter;
     std::string log_file_name;
     std::string log_file_path;
+    std::string aznfsfingerprint;
+    std::string gatepass_mount_command;
+    std::string output11;
 
     /* 
      * There can only be 1 reader of this pipe. Hence, we should ensure we 
@@ -759,6 +762,14 @@ int main(int argc, char *argv[])
         AZLogError("set_signal_handler(SIGUSR1) failed: {}", ::strerror(errno));
         goto err_out3;
     }
+
+    // Do gatepass mount.
+    aznfsfingerprint = "80a18d5c-9553-4c64-88dd-d7553c6b3beb";
+    gatepass_mount_command = "mount -t nfs -o tcp,vers=3,nolock " + std::string(aznfsc_cfg.account) + "." + std::string(aznfsc_cfg.cloud_suffix) + ":/" + std::string(aznfsc_cfg.account) + "/" + std::string(aznfsc_cfg.container) + "/" + aznfsfingerprint + " " + std::string(aznfsc_cfg.mountpoint) + " 2>&1";
+    output11 = run_command(gatepass_mount_command);
+
+    AZLogInfo("gatepass");
+    AZLogInfo(output11);
 
     if (fuse_session_mount(se, opts.mountpoint) != 0) {
         AZLogError("fuse_session_mount failed");
