@@ -436,9 +436,11 @@ struct membuf
      */
     void trim(uint64_t trim_len, bool left);
 
-    void set_deferred_for_release()
+    void set_deferred_for_release();
+
+    bool is_deferred_for_release() const
     {
-        deferred_for_release = true;
+        return deferred_for_release;
     }
 
 private:
@@ -572,9 +574,9 @@ private:
     std::atomic<uint32_t> inuse = 0;
 
     /*
-     * This flag will be set when a release call avoids releasing the chunk
-     * due to inuse > 0. When inuse drops to 0 and if this flag is set,
-     * release() will be called to try and free this chunk.
+     * This flag will be set when release() avoids releasing the chunk
+     * due to failing of safe_to_release() check.
+     * This chunk will be freed the next time we try to access the filecache.
      */
     std::atomic<bool> deferred_for_release = false;
 };
@@ -1335,6 +1337,8 @@ public:
      * the file inode is forgotten by fuse and we don't want to keep the cache
      * anymore. For the latter case, clear_nolock() must be called with
      * shutdown param as true.
+     * This can also be called to release the deferred membufs in which case
+     * clear_only_deferred should be set to true.
      *
      * When shutdown is false, following chunks won't be released.
      * - Which are inuse.
@@ -1345,7 +1349,7 @@ public:
      * the file is no longer being used, so we release all chunks irrespective
      * of their current state.
      */
-    void clear_nolock(bool shutdown = false);
+    void clear_nolock(bool shutdown = false, bool clear_only_deferred = false);
 
     void clear(bool shutdown = false)
     {
@@ -1370,6 +1374,24 @@ public:
     bool test_and_clear_invalidate_pending()
     {
         return invalidate_pending.exchange(false);
+    }
+
+    /*
+     * Sets the deferred_for_release flag for this cache.
+     * This will be set if the containing membuf has deferred_for_release
+     * set to true on this.
+     */
+    void set_deferred_for_release()
+    {
+        deferred_for_release = true;
+    }
+
+    /**
+     * Atomically clear deferred_for_release and return the old value.
+     */
+    bool test_and_clear_deferred_for_release()
+    {
+        return deferred_for_release.exchange(false);
     }
 
     /**
@@ -1957,6 +1979,16 @@ private:
      * purge the cache before proceeding.
      */
     std::atomic<bool> invalidate_pending = false;
+
+    /*
+     * Flag to mark the cache as deferred_for_release w/o actually releasing
+     * the deferred membufs.
+     * A membuf will be marked deferred_for_release if the release() call fails to
+     * free it as safe_to_release() check returns false.
+     * Once this is set, next cache lookup will start freeing all the membufs which
+     * are marked deferred_for_release() and are safe to release.
+     */
+    std::atomic<bool> deferred_for_release = false;
 
     // Count of total active caches.
     static std::atomic<uint64_t> num_caches;
