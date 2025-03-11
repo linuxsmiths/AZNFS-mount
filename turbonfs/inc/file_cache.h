@@ -436,11 +436,11 @@ struct membuf
      */
     void trim(uint64_t trim_len, bool left);
 
-    void set_deferred_for_release();
+    void set_deferred_release();
 
-    bool is_deferred_for_release() const
+    bool is_deferred_release() const
     {
-        return deferred_for_release;
+        return deferred_release;
     }
 
 private:
@@ -574,11 +574,10 @@ private:
     std::atomic<uint32_t> inuse = 0;
 
     /*
-     * This flag will be set when release() avoids releasing the chunk
+     * This flag will be set when release() avoids releasing the membuf
      * due to failing of safe_to_release() check.
-     * This chunk will be freed the next time we try to access the filecache.
      */
-    std::atomic<bool> deferred_for_release = false;
+    std::atomic<bool> deferred_release = false;
 };
 
 /**
@@ -1377,21 +1376,22 @@ public:
     }
 
     /*
-     * Sets the deferred_for_release flag for this cache.
-     * This will be set if the containing membuf has deferred_for_release
-     * set to true on this.
+     * Sets the deferred_release flag for this cache.
+     * This will be set when atleast one of the containing membuf has deferred_release
+     * set to true.
+     * This will be cleared when the filcache is next accessed.
      */
-    void set_deferred_for_release()
+    void set_deferred_release()
     {
-        deferred_for_release = true;
+        deferred_release = true;
     }
 
     /**
-     * Atomically clear deferred_for_release and return the old value.
+     * Atomically clear deferred_release and return the old value.
      */
-    bool test_and_clear_deferred_for_release()
+    bool test_and_clear_deferred_release()
     {
-        return deferred_for_release.exchange(false);
+        return deferred_release.exchange(false);
     }
 
     /**
@@ -1981,14 +1981,14 @@ private:
     std::atomic<bool> invalidate_pending = false;
 
     /*
-     * Flag to mark the cache as deferred_for_release w/o actually releasing
+     * Flag to mark the cache as deferred_release w/o actually releasing
      * the deferred membufs.
-     * A membuf will be marked deferred_for_release if the release() call fails to
-     * free it as safe_to_release() check returns false.
-     * Once this is set, next cache lookup will start freeing all the membufs which
-     * are marked deferred_for_release() and are safe to release.
+     * This will be set when atleast one of the containing membuf has deferred_release
+     * set to true.
+     * Once this is set, next filecache lookup will start freeing all the membufs having
+     * deferred_release set and are safe to release.
      */
-    std::atomic<bool> deferred_for_release = false;
+    std::atomic<bool> deferred_release = false;
 
     // Count of total active caches.
     static std::atomic<uint64_t> num_caches;
