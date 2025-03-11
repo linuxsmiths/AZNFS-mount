@@ -173,6 +173,12 @@ membuf::~membuf()
     assert(!allocated_buffer);
 }
 
+void membuf::set_deferred_release()
+{
+    deferred_release = true;
+    bcc->set_deferred_release();
+}
+
 /**
  * Caller must call trim() only when membuf is not owned by any other thread.
  */
@@ -1095,6 +1101,18 @@ std::vector<bytes_chunk> bytes_chunk_cache::scan(uint64_t offset,
 	}
 
     /*
+     * Before we proceed with the cache lookup, check if deferred_release
+     * is set. If yes, go over the cache and free up membufs.
+     *
+     * TODO: Should this have a time check so that we don't go over the entire
+     *       map multiple times over a short timespan?
+     */
+    if (test_and_clear_deferred_release()) {
+        AZLogDebug("[{}] clearing deferred membufs", CACHE_TAG);
+        clear_nolock(false /* shutdown*/, true /* clear_only_deferred */);
+    }
+
+    /*
      * Temp variables to hold details for releasing a range.
      * All chunks in the range [begin_delete, end_delete) will be freed as
      * they fall completely inside the released range.
@@ -1961,6 +1979,20 @@ allocate_only_chunk:
                     bytes_released_full2 += bc->length;
 
                     chunkmap.erase(_it);
+                } else {
+                    AZLogVerbose("<Release [{}, {})> skipping [{}, {}) as not safe "
+                                "to release: inuse={}, dirty={}",
+                                offset, offset + length,
+                                bc->offset, bc->offset + bc->length,
+                                bc->get_membuf()->get_inuse(),
+                                bc->get_membuf()->is_dirty());
+
+                    /*
+                     * Since this chunk is not safe to be release now, set the
+                     * deferred_release flag so that it can be release when the
+                     * filecache is accessed next.
+                     */
+                    bc->get_membuf()->set_deferred_release();
                 }
             }
         }
@@ -2663,11 +2695,11 @@ int64_t bytes_chunk_cache::drop(uint64_t offset, uint64_t length)
 /**
  * Caller MUST hold exclusive lock on chunkmap_lock_43.
  */
-void bytes_chunk_cache::clear_nolock(bool shutdown)
+void bytes_chunk_cache::clear_nolock(bool shutdown, bool clear_only_deferred)
 {
-    AZLogDebug("[{}] Cache purge(shutdown={}): chunkmap.size()={}, "
+    AZLogDebug("[{}] Cache purge(shutdown={}, clear_only_deferred={}): chunkmap.size()={}, "
                "backing_file_name={}",
-               CACHE_TAG, shutdown, chunkmap.size(), backing_file_name);
+               CACHE_TAG, shutdown, clear_only_deferred, chunkmap.size(), backing_file_name);
 
     assert(bytes_allocated <= bytes_allocated_g);
     assert(bytes_cached <= bytes_cached_g);
@@ -2713,6 +2745,13 @@ void bytes_chunk_cache::clear_nolock(bool shutdown)
         const struct bytes_chunk *bc = &(it->second);
         const struct membuf *mb = bc->get_membuf();
 
+        if (clear_only_deferred && !mb->is_deferred_release()) {
+            /*
+             * The chunk should not be released if deferred_release is not
+             * set on the membuf.
+             */
+            continue;
+        }
         /*
          * Possibly under IO.
          * It could be writer writing application data into the membuf, or
@@ -2726,18 +2765,18 @@ void bytes_chunk_cache::clear_nolock(bool shutdown)
         if (!shutdown) {
             if (mb->is_inuse()) {
                 AZLogDebug("[{}] Cache purge: skipping inuse membuf(offset={}, "
-                           "length={}) (inuse count={}, dirty={})",
+                           "length={}) (inuse count={}, dirty={}, deferred_release={})",
                            CACHE_TAG, mb->offset.load(), mb->length.load(),
-                           mb->get_inuse(), mb->is_dirty());
+                           mb->get_inuse(), mb->is_dirty(), mb->is_deferred_release());
                 continue;
             }
         } else {
             if (mb->is_inuse()) {
                 AZLogError("[{}] Cache purge: Got inuse membuf(offset={}, "
-                           "length={}) (inuse count={}, dirty={}) when shutting "
-                           "down cache",
+                           "length={}) (inuse count={}, dirty={}, deferred_release={}) "
+                           " when shutting down cache",
                            CACHE_TAG, mb->offset.load(), mb->length.load(),
-                           mb->get_inuse(), mb->is_dirty());
+                           mb->get_inuse(), mb->is_dirty(), mb->is_deferred_release());
                 // No membufs should be in use when file is closed.
                 assert(0);
             }
@@ -2752,18 +2791,18 @@ void bytes_chunk_cache::clear_nolock(bool shutdown)
         if (!shutdown) {
             if (mb->is_locked()) {
                 AZLogDebug("[{}] Cache purge: skipping locked membuf(offset={}, "
-                           "length={}) (inuse count={}, dirty={})",
+                           "length={}) (inuse count={}, dirty={}, deferred_release={})",
                            CACHE_TAG, mb->offset.load(), mb->length.load(),
-                           mb->get_inuse(), mb->is_dirty());
+                           mb->get_inuse(), mb->is_dirty(), mb->is_deferred_release());
                 continue;
             }
         } else {
             if (mb->is_locked()) {
                 AZLogError("[{}] Cache purge: Got locked membuf(offset={}, "
-                           "length={}) (inuse count={}, dirty={}) when shutting "
-                           "down cache",
+                           "length={}) (inuse count={}, dirty={}, deferred_release={}) "
+                           "when shutting down cache",
                            CACHE_TAG, mb->offset.load(), mb->length.load(),
-                           mb->get_inuse(), mb->is_dirty());
+                           mb->get_inuse(), mb->is_dirty(), mb->is_deferred_release());
                 // No membufs should be locked when file is closed.
                 assert(0);
             }
@@ -2819,9 +2858,9 @@ void bytes_chunk_cache::clear_nolock(bool shutdown)
         }
 
         AZLogDebug("[{}] Cache purge: deleting membuf(offset={}, length={}), "
-                   "use_count={}, deleted {} of {}",
+                   "use_count={} , deferred_release={}, deleted {} of {}",
                    CACHE_TAG, mb->offset.load(), mb->length.load(),
-                   bc->get_membuf_usecount(),
+                   bc->get_membuf_usecount(), mb->is_deferred_release(),
                    start_size - chunkmap.size(), start_size);
 
         // Make sure the compound check also passes.
