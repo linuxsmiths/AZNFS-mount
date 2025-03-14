@@ -219,6 +219,16 @@ public:
     }
 
     /**
+     * Returns the byte offset below which we are guaranteed to not get any
+     * read. Caller can use this to release any unused buffers.
+     */
+    uint64_t release_till() const
+    {
+        const uint64_t min_section = (min_byte_read / SECTION_SIZE);
+        return min_section * SECTION_SIZE;
+    }
+
+    /**
      * Returns the currently observed access pattern.
      */
     bool is_sequential() const
