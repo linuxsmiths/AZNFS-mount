@@ -224,8 +224,8 @@ public:
      */
     uint64_t release_till() const
     {
-        const uint64_t min_section = (min_byte_read / SECTION_SIZE);
-        return min_section * SECTION_SIZE;
+        const uint64_t curr_section = (max_byte_read / SECTION_SIZE);
+        return curr_section * SECTION_SIZE;
     }
 
     /**
