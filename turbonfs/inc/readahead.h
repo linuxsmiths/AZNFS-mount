@@ -239,7 +239,8 @@ public:
          * issue lot of parallel reads which together are working towards a
          * sequential goal but may be ordered upto SECTION_SIZE apart.
          */
-        return (max_byte_read == UINT64_MAX) ? 0 : (max_byte_read - SECTION_SIZE);
+        return (max_byte_read == UINT64_MAX) ? 0 :
+                std::max((int64_t) (max_byte_read - SECTION_SIZE), 0L);
     }
 
     /**
@@ -292,6 +293,9 @@ public:
         ra_ongoing -= length;
     }
 
+    /**
+     * Wait for ongoing readaheads to complete.
+     */
     void wait_for_ongoing_readahead() const;
 
     bool in_ra_window(uint64_t offset, uint64_t length) const
