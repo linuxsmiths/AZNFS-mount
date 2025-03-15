@@ -239,8 +239,7 @@ public:
          * issue lot of parallel reads which together are working towards a
          * sequential goal but may be ordered upto SECTION_SIZE apart.
          */
-        const uint64_t curr_section = (max_byte_read / SECTION_SIZE);
-        return std::max((int64_t) (curr_section - 1), 0L) * SECTION_SIZE;
+        return (max_byte_read == UINT64_MAX) ? 0 : (max_byte_read - SECTION_SIZE);
     }
 
     /**
