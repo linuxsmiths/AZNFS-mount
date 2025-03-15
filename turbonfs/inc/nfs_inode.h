@@ -1705,6 +1705,9 @@ public:
                 filecache_handle->invalidate();
 
                 if (purge_now) {
+                    if (has_rastate()) {
+                        get_rastate()->wait_for_ongoing_readahead();
+                    }
                     AZLogDebug("[{}] (Purgenow) Purging filecache", get_fuse_ino());
                     filecache_handle->clear(true /* shutdown */);
                     AZLogDebug("[{}] (Purgenow) Purged filecache", get_fuse_ino());

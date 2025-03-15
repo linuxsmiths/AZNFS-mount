@@ -292,6 +292,8 @@ public:
         ra_ongoing -= length;
     }
 
+    void wait_for_ongoing_readahead() const;
+
     bool in_ra_window(uint64_t offset, uint64_t length) const
     {
         assert((int64_t) (offset + length) >= 0);
