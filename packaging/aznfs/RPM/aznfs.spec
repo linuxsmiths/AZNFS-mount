@@ -28,6 +28,14 @@ tar -xzvf ${STG_DIR}/AZNFS_PACKAGE_NAME-${RELEASE_NUMBER}-1.x86_64.tar.gz -C ${S
 /opt/microsoft/aznfs/aznfs_install.sh
 /lib/systemd/system/aznfswatchdog.service
 /lib/systemd/system/aznfswatchdogv4.service
+/opt/microsoft/aznfs/libs/libc.so.6
+/opt/microsoft/aznfs/libs/libffi.so.8
+/opt/microsoft/aznfs/libs/libm.so.6
+/opt/microsoft/aznfs/libs/libp11-kit.so.0
+/opt/microsoft/aznfs/libs/libunistring.so.2
+/opt/microsoft/aznfs/libs/ld-linux-x86-64.so.2
+/sample-turbo-config.yaml
+/sbin/aznfsclient
 
 %pre
 init="$(ps -q 1 -o comm=)"
@@ -208,6 +216,11 @@ if [ $1 == 2 ]; then
 	        mv -vf /opt/microsoft/aznfs/randbytes /opt/microsoft/aznfs/data/
 	        chattr -f +i /opt/microsoft/aznfs/data/randbytes
 	fi
+fi
+
+# Move the turbo sample config file to optdirdata if it exists.
+if [ -f /opt/microsoft/aznfs/sample-turbo-config.yaml ]; then
+        mv -vf /opt/microsoft/aznfs/sample-turbo-config.yaml /opt/microsoft/aznfs/data/
 fi
 
 # Check if the config file exists; if not, create it.

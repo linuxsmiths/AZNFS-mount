@@ -36,12 +36,30 @@ generate_rpm_package()
 	mkdir -p ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}/sbin
 	gcc -static ${SOURCE_DIR}/src/mount.aznfs.c -o ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}/sbin/mount.aznfs
 
+	# copy the aznfsclient config file.
+	cp -avf ${SOURCE_DIR}/turbonfs/sample-turbo-config.yaml ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}
+
+	# copy the aznfsclient.
+	cp -avf ${SOURCE_DIR}/turbonfs/build/aznfsclient ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}/sbin/aznfsclient
+
 	mkdir -p ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${opt_dir}
 	cp -avf ${SOURCE_DIR}/lib/common.sh ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${opt_dir}/
 	cp -avf ${SOURCE_DIR}/src/mountscript.sh ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${opt_dir}/
 	cp -avf ${SOURCE_DIR}/src/nfsv3mountscript.sh ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${opt_dir}/
 	cp -avf ${SOURCE_DIR}/src/nfsv4mountscript.sh ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${opt_dir}/
 	cp -avf ${SOURCE_DIR}/scripts/aznfs_install.sh ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${opt_dir}/
+
+	# Package aznfsclient dependencies in opt_dir.
+	libs_dir=${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${opt_dir}/libs
+	mkdir -p ${libs_dir}
+	cp -avfrH ${STG_DIR}/deb/${pkg_dir}${opt_dir}/libs ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${opt_dir}
+
+	# move ld-linux too, we have set it as interpreter.
+	ld_linux_path=$(ldd ${SOURCE_DIR}/turbonfs/build/aznfsclient | grep "ld-linux" | awk '{print $1}')
+	ld_linux_name=$(basename "$ld_linux_path")
+	cp -avfrH  ${ld_linux_path} ${libs_dir}
+
+	patchelf --set-interpreter ${opt_dir}/libs/${ld_linux_name} ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}/sbin/aznfsclient
 
 	mkdir -p ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${system_dir}
 	cp -avf ${SOURCE_DIR}/src/aznfswatchdog.service ${STG_DIR}/${rpm_dir}/tmp${rpm_buildroot_dir}/${rpm_pkg_dir}${system_dir}
@@ -215,6 +233,28 @@ cp -avf ${SOURCE_DIR}/turbonfs/sample-turbo-config.yaml ${STG_DIR}/deb/${pkg_dir
 mkdir -p ${STG_DIR}/deb/${pkg_dir}${system_dir}
 cp -avf ${SOURCE_DIR}/src/aznfswatchdog.service ${STG_DIR}/deb/${pkg_dir}${system_dir}
 cp -avf ${SOURCE_DIR}/src/aznfswatchdogv4.service ${STG_DIR}/deb/${pkg_dir}${system_dir}
+
+
+# Package aznfsclient dependencies in opt_dir.
+libs_dir=${STG_DIR}/deb/${pkg_dir}${opt_dir}/libs
+mkdir -p ${libs_dir}
+
+# Copy the dependencies.
+cp -avfH $(ldd ${SOURCE_DIR}/turbonfs/build/aznfsclient | grep "=>" | awk '{print $3}') ${libs_dir}
+
+# Patch the libs to link within the same directory.
+for lib in ${libs_dir}/*.so*; do
+	lib_name=$(basename "$lib")
+	echo "Setting rpath to ${opt_dir}/libs for $lib_name"
+	patchelf --set-rpath ${opt_dir}/libs "$lib"
+done
+
+# move ld-linux too, we will set it as interpreter.
+ld_linux_path=$(ldd ${SOURCE_DIR}/turbonfs/build/aznfsclient | grep "ld-linux" | awk '{print $1}')
+ld_linux_name=$(basename "$ld_linux_path")
+cp -avfH  ${ld_linux_path} ${libs_dir}
+
+patchelf --set-interpreter ${opt_dir}/libs/${ld_linux_name} ${STG_DIR}/deb/${pkg_dir}/sbin/aznfsclient
 
 # Create the deb package.
 dpkg-deb -Zgzip --root-owner-group --build $STG_DIR/deb/$pkg_dir
