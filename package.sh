@@ -197,8 +197,7 @@ fi
 
 cmake -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
       -DENABLE_PARANOID=${PARANOID} \
-      -DENABLE_INSECURE_AUTH_FOR_DEVTEST=${INSECURE_AUTH_FOR_DEVTEST} \
-      -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake ..
+      -DENABLE_INSECURE_AUTH_FOR_DEVTEST=${INSECURE_AUTH_FOR_DEVTEST} ..
 make
 popd
 
@@ -215,6 +214,20 @@ cp -avf ${SOURCE_DIR}/turbonfs/sample-turbo-config.yaml ${STG_DIR}/deb/${pkg_dir
 mkdir -p ${STG_DIR}/deb/${pkg_dir}${system_dir}
 cp -avf ${SOURCE_DIR}/src/aznfswatchdog.service ${STG_DIR}/deb/${pkg_dir}${system_dir}
 cp -avf ${SOURCE_DIR}/src/aznfswatchdogv4.service ${STG_DIR}/deb/${pkg_dir}${system_dir}
+
+
+# Package aznfsclient dependencies in opt_dir.
+libs_dir=${STG_DIR}/deb/${pkg_dir}${opt_dir}/libs
+mkdir -p ${libs_dir}
+
+# Copy the depdencies.
+cp -avfH $(ldd ${SOURCE_DIR}/turbonfs/build/aznfsclient | grep "=>" | awk '{print $3}') ${libs_dir}
+
+# Patch the libs to link within the same directory.
+for lib in ${libs_dir}/*.so*; do
+	echo "Processing $lib"
+	patchelf --set-rpath ${libs_dir} "$lib"
+done
 
 # Create the deb package.
 dpkg-deb -Zgzip --root-owner-group --build $STG_DIR/deb/$pkg_dir

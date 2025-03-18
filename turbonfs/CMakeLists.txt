@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.7)
 
+set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/extern/vcpkg/scripts/buildsystems/vcpkg.cmake")
+
 project(aznfsclient
         DESCRIPTION "FUSE driver for mounting Blob NFS shares"
         LANGUAGES CXX
@@ -338,6 +340,10 @@ target_compile_options(${CMAKE_PROJECT_NAME}
                        PRIVATE -Wextra -Wno-unused-parameter
                        PRIVATE -Werror
                        )
+
+
+target_link_options(${CMAKE_PROJECT_NAME}
+                    PRIVATE "-Wl,-rpath,/opt/microsoft/aznfs/libs")
 
 # All libraries.
 target_link_libraries(${CMAKE_PROJECT_NAME}
