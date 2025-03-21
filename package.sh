@@ -13,7 +13,7 @@ if [ "$(uname -m)" == "x86_64" ]; then
 	# Debian uses amd64 in place of x86_64.
 	debarch="amd64"
 elif [ "$(uname -m)" == "aarch64" ]; then
-	arch="arm64"
+	arch="aarch64"
 	debarch="arm64"
 else
 	echo "Unsupported architecture: $(uname -m)"
@@ -79,7 +79,7 @@ generate_rpm_package()
 	cp -avfH ${libs_dir}/* ${rpm_libs_dir}
 
 	# Create the archive for the package.
-	tar -cvzf ${rpm_pkg_dir}.tar.gz -C ${STG_DIR}/${rpm_dir}/tmp root
+	tar -cvzf ${STG_DIR}/${rpm_pkg_dir}.tar.gz -C ${STG_DIR}/${rpm_dir}/tmp root
 
 	# Copy the SPEC file to change the placeholders depending upon the RPM distro.
 	cp -avf ${SOURCE_DIR}/packaging/${pkg_name}/RPM/aznfs.spec ${STG_DIR}/${rpm_dir}/tmp/
@@ -96,6 +96,7 @@ generate_rpm_package()
 	# Insert current release number and RPM_DIR value.
 	sed -i -e "s/Version: x.y.z/Version: ${RELEASE_NUMBER}/g" ${STG_DIR}/${rpm_dir}/tmp/aznfs.spec
 	sed -i -e "s/RPM_DIR/${rpm_dir}/g" ${STG_DIR}/${rpm_dir}/tmp/aznfs.spec
+	sed -i -e "s/BUILD_ARCH/${arch}/g" ${STG_DIR}/${rpm_dir}/tmp/aznfs.spec
 	
 	# Replace the placeholders for various package names in aznfs.spec file. 
 	if [ "$rpm_dir" == "suse" ]; then
@@ -218,6 +219,7 @@ chmod +x ${STG_DIR}/deb/${pkg_dir}/DEBIAN/*
 
 # Insert current release number.
 sed -i -e "s/Version: x.y.z/Version: ${RELEASE_NUMBER}/g" ${STG_DIR}/deb/${pkg_dir}/DEBIAN/control
+sed -i -e "s/BUILD_ARCH/${debarch}/g" ${STG_DIR}/deb/${pkg_dir}/DEBIAN/control
 
 # Copy other static package file(s).
 mkdir -p ${STG_DIR}/deb/${pkg_dir}/usr/sbin
@@ -321,4 +323,4 @@ generate_rpm_package mariner
 # Generating Tarball for AKS#
 #############################
 
-generate_tarball_package $debarch
+generate_tarball_package $arch

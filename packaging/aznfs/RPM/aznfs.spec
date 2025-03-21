@@ -15,7 +15,7 @@ Mount helper program for correctly handling endpoint IP address changes for Azur
 
 %prep
 mkdir -p ${STG_DIR}/RPM_DIR/root/rpmbuild/SOURCES/
-tar -xzvf ${STG_DIR}/AZNFS_PACKAGE_NAME-${RELEASE_NUMBER}-1.x86_64.tar.gz -C ${STG_DIR}/RPM_DIR/
+tar -xzvf ${STG_DIR}/AZNFS_PACKAGE_NAME-${RELEASE_NUMBER}-1.BUILD_ARCH.tar.gz -C ${STG_DIR}/RPM_DIR/
 
 %files
 /usr/sbin/aznfswatchdog
@@ -29,7 +29,7 @@ tar -xzvf ${STG_DIR}/AZNFS_PACKAGE_NAME-${RELEASE_NUMBER}-1.x86_64.tar.gz -C ${S
 /lib/systemd/system/aznfswatchdog.service
 /lib/systemd/system/aznfswatchdogv4.service
 OPT_LIBS
-/opt/microsoft/aznfs/data/sample-turbo-config.yaml
+/opt/microsoft/aznfs/sample-turbo-config.yaml
 /sbin/aznfsclient
 
 %pre

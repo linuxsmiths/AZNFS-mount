@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   package_mount_helper_amd64:
-    name: Package and Release Mount Helper ${{ github.event.inputs.versionName }} (Test Release)
+    name: Package and Release ${{ github.event.inputs.versionName }} for amd64 (Test Release)
     runs-on: ubuntu-22.04
     steps:
     - name: Check Version Number
@@ -39,11 +39,6 @@ jobs:
             echo "Test Release version must be of the form 0.y.z" 
             false
         fi
-    - name: Install arm64 Cross-Compile Toolchain
-      shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt install -y gcc-aarch64-linux-gnu libunwind-dev
     - name: Install patchelf
       shell: bash
       run: |
@@ -69,17 +64,17 @@ jobs:
         tag_name: ${{ github.event.inputs.versionName }}
         target_commitish: ${{ github.sha }}
         files: |
-          ${{ github.workspace }}/deb/aznfs-${{ github.event.inputs.versionName }}-1_amd64.deb
-          ${{ github.workspace }}/rpm/root/rpmbuild/RPMS/x86_64/aznfs-${{ github.event.inputs.versionName }}-1.x86_64.rpm
-          ${{ github.workspace }}/suse/root/rpmbuild/RPMS/x86_64/aznfs_sles-${{ github.event.inputs.versionName }}-1.x86_64.rpm
-          ${{ github.workspace }}/mariner/root/rpmbuild/RPMS/x86_64/aznfs_mariner-${{ github.event.inputs.versionName }}-1.x86_64.rpm
-          ${{ github.workspace }}/scripts/aznfs_install.sh
-          ${{ github.workspace }}/tarball/aznfs-${{ github.event.inputs.versionName }}-1.x86_64.tar.gz
+          ${{ github.workspace }}/amd64/deb/aznfs-${{ github.event.inputs.versionName }}-1_amd64.deb
+          ${{ github.workspace }}/amd64/rpm/root/rpmbuild/RPMS/x86_64/aznfs-${{ github.event.inputs.versionName }}-1.x86_64.rpm
+          ${{ github.workspace }}/amd64/suse/root/rpmbuild/RPMS/x86_64/aznfs_sles-${{ github.event.inputs.versionName }}-1.x86_64.rpm
+          ${{ github.workspace }}/amd64/mariner/root/rpmbuild/RPMS/x86_64/aznfs_mariner-${{ github.event.inputs.versionName }}-1.x86_64.rpm
+          ${{ github.workspace }}/amd64/scripts/aznfs_install.sh
+          ${{ github.workspace }}/amd64/tarball/aznfs-${{ github.event.inputs.versionName }}-1.x86_64.tar.gz
         body: |
           New Test Release ${{ github.event.inputs.versionName }}
 
   package_mount_helper_arm64:
-    name: Package and Release Mount Helper ${{ github.event.inputs.versionName }} (Test Release)
+    name: Package and Release ${{ github.event.inputs.versionName }} for arm64 (Test Release)
     runs-on: ubuntu-22.04-arm
     steps:
     - name: Check Version Number
@@ -115,11 +110,10 @@ jobs:
         tag_name: ${{ github.event.inputs.versionName }}
         target_commitish: ${{ github.sha }}
         files: |
-          ${{ github.workspace }}/deb/aznfs-${{ github.event.inputs.versionName }}-1_arm64.deb
-          ${{ github.workspace }}/rpm/root/rpmbuild/RPMS/arm64/aznfs-${{ github.event.inputs.versionName }}-1.arm64.rpm
-          ${{ github.workspace }}/suse/root/rpmbuild/RPMS/arm64/aznfs_sles-${{ github.event.inputs.versionName }}-1.arm64.rpm
-          ${{ github.workspace }}/mariner/root/rpmbuild/RPMS/arm64/aznfs_mariner-${{ github.event.inputs.versionName }}-1.arm64.rpm
-          ${{ github.workspace }}/scripts/aznfs_install.sh
-          ${{ github.workspace }}/tarball/aznfs-${{ github.event.inputs.versionName }}-1.arm64.tar.gz
+          ${{ github.workspace }}/arm64/deb/aznfs-${{ github.event.inputs.versionName }}-1_arm64.deb
+          ${{ github.workspace }}/arm64/rpm/root/rpmbuild/RPMS/aarch64/aznfs-${{ github.event.inputs.versionName }}-1.aarch64.rpm
+          ${{ github.workspace }}/arm64/suse/root/rpmbuild/RPMS/aarch64/aznfs_sles-${{ github.event.inputs.versionName }}-1.aarch64.rpm
+          ${{ github.workspace }}/arm64/mariner/root/rpmbuild/RPMS/aarch64/aznfs_mariner-${{ github.event.inputs.versionName }}-1.aarch64.rpm
+          ${{ github.workspace }}/arm64/tarball/aznfs-${{ github.event.inputs.versionName }}-1.aarch64.tar.gz
         body: |
           New Test Release ${{ github.event.inputs.versionName }}
