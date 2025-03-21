@@ -172,7 +172,7 @@ if(NOT NINJA_FOUND)
 endif()
 
 # Meson will install the fuse library and header files in the following paths.
-set(fuse3_LIBRARY "/usr/local/lib/x86_64-linux-gnu/libfuse3.a")
+set(fuse3_LIBRARY "/usr/local/lib/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu/libfuse3.a")
 set(fuse3_INCLUDE_DIR "/usr/local/include")
 
 add_custom_command(
@@ -378,13 +378,15 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
                       dl
                       pthread
                       nfs
-                      # GNUTLS libraries are needed by static libnfs.
-                      ${GNUTLS_ALL_LIBRARIES}
                       yaml-cpp
                       spdlog
-                      Azure::azure-identity 
+                      Azure::azure-identity
                       Azure::azure-storage-blobs
-                      nlohmann_json::nlohmann_json)
+                      ${CMAKE_SOURCE_DIR}/build/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/libazure-core.a
+                      ${CMAKE_SOURCE_DIR}/build/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/libcrypto.a
+                      nlohmann_json::nlohmann_json
+                      # GNUTLS libraries are needed by static libnfs.
+                      ${GNUTLS_ALL_LIBRARIES})
 
 if(ENABLE_TCMALLOC)
 target_link_libraries(${CMAKE_PROJECT_NAME}
