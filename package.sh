@@ -314,5 +314,7 @@ generate_rpm_package mariner
 # Generating Tarball for amd64 and arm64 #
 ##########################################
 
-generate_tarball_package amd64
+generate_tarball_package 
+
+export VCPKG_FORCE_SYSTEM_BINARIES=1
 generate_tarball_package arm64
