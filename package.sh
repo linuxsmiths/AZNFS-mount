@@ -8,6 +8,18 @@
 # Exit on error.
 set -e
 
+if [ "$(uname -m)" == "x86_64" ]; then
+	arch="x86_64"
+	# Debian uses amd64 in place of x86_64.
+	debarch="amd64"
+elif [ "$(uname -m)" == "aarch64" ]; then
+	arch="arm64"
+	debarch="arm64"
+else
+	echo "Unsupported architecture: $(uname -m)"
+	exit 1
+fi
+
 generate_rpm_package()
 {
 	rpm_dir=$1
@@ -15,12 +27,12 @@ generate_rpm_package()
 
 	# Overwrite rpm_pkg_dir in case of SUSE.
 	if [ "$rpm_dir" == "suse" ]; then
-		rpm_pkg_dir="${pkg_name}_sles-${RELEASE_NUMBER}-1.x86_64"
+		rpm_pkg_dir="${pkg_name}_sles-${RELEASE_NUMBER}-1.$arch"
 	fi
 
 	# Overwrite rpm_pkg_dir in case of Mariner.
 	if [ "$rpm_dir" == "mariner" ]; then
-		rpm_pkg_dir="${pkg_name}_mariner-${RELEASE_NUMBER}-1.x86_64"
+		rpm_pkg_dir="${pkg_name}_mariner-${RELEASE_NUMBER}-1.$arch"
 		is_mariner=1
 	fi
 
@@ -120,16 +132,8 @@ generate_tarball_package()
     local tar_pkg_dir
     local compiler
 
-    if [ "$arch" == "amd64" ]; then
-        tar_pkg_dir="${pkg_name}-${RELEASE_NUMBER}-1.x86_64"
-        compiler="gcc"
-    elif [ "$arch" == "arm64" ]; then
-        tar_pkg_dir="${pkg_name}-${RELEASE_NUMBER}-1.arm64"
-        compiler="aarch64-linux-gnu-gcc"
-    else
-        echo "Unsupported architecture: $arch"
-        return 1
-    fi
+    tar_pkg_dir="${pkg_name}-${RELEASE_NUMBER}-1.$arch"
+    compiler="gcc"
 
     # Create the directory to hold the package contents.
     mkdir -p ${STG_DIR}/tarball/${tar_pkg_dir}
@@ -157,8 +161,6 @@ generate_tarball_package()
     ###########################################
     # Bundle aznfsclient and its dependencies #
     ###########################################
-
-    # TODO: Add ARM aznfsclient support.
 
     # copy the aznfsclient config file.
     cp -avf ${SOURCE_DIR}/turbonfs/sample-turbo-config.yaml ${STG_DIR}/tarball/${tar_pkg_dir}${opt_dir}/
@@ -193,8 +195,8 @@ generate_tarball_package()
 
 #STG_DIR, RELEASE_NUMBER and SOURCE_DIR will be taken as env var.
 pkg_name="aznfs"
-pkg_dir="${pkg_name}-${RELEASE_NUMBER}-1_amd64"
-rpm_pkg_dir="${pkg_name}-${RELEASE_NUMBER}-1.x86_64"
+pkg_dir="${pkg_name}-${RELEASE_NUMBER}-1_$debarch"
+rpm_pkg_dir="${pkg_name}-${RELEASE_NUMBER}-1.$arch"
 opt_dir="/opt/microsoft/${pkg_name}"
 system_dir="/lib/systemd/system"
 rpmbuild_dir="/root/rpmbuild"
@@ -243,6 +245,11 @@ if [ "${BUILD_TYPE}" == "Debug" ]; then
 else
     PARANOID=OFF
     INSECURE_AUTH_FOR_DEVTEST=OFF
+fi
+
+# vcpkg required env variable VCPKG_FORCE_SYSTEM_BINARIES to be set for arm64.
+if [ "$(uname -m)" == "aarch64" ]; then
+    export VCPKG_FORCE_SYSTEM_BINARIES=1
 fi
 
 cmake -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
@@ -310,11 +317,8 @@ generate_rpm_package rpm
 generate_rpm_package suse
 generate_rpm_package mariner
 
-##########################################
-# Generating Tarball for amd64 and arm64 #
-##########################################
+#############################
+# Generating Tarball for AKS#
+#############################
 
-generate_tarball_package 
-
-export VCPKG_FORCE_SYSTEM_BINARIES=1
-generate_tarball_package arm64
+generate_tarball_package $debarch

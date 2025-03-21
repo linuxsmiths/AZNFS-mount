@@ -345,7 +345,19 @@ target_compile_options(${CMAKE_PROJECT_NAME}
 # forced to use the shared version and bundle it.
 #
 set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
+
 find_library(GNUTLS_STATIC_LIB libgnutls.a REQUIRED)
+#
+# arm64 libgnutls.a has multiple definitions for some symbols exported by
+# libcrypto.a. The libcrypto.a object has some more symbols which are needed,
+# so we delete the offending object from libgnutls.a before linking.
+#
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+execute_process(
+	COMMAND bash -c "if [ ! -e ${GNUTLS_STATIC_LIB}.orig ]; then cp -vf ${GNUTLS_STATIC_LIB} ${GNUTLS_STATIC_LIB}.orig; ar dv ${GNUTLS_STATIC_LIB} aes-aarch64.o; fi"
+	COMMAND_ERROR_IS_FATAL ANY)
+endif()
+
 find_library(HOGWEED_STATIC_LIB libhogweed.a REQUIRED)
 find_library(NETTLE_STATIC_LIB libnettle.a REQUIRED)
 find_library(TASN1_STATIC_LIB libtasn1.a REQUIRED)
@@ -378,15 +390,13 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
                       dl
                       pthread
                       nfs
+                      # GNUTLS libraries are needed by static libnfs.
+                      ${GNUTLS_ALL_LIBRARIES}
                       yaml-cpp
                       spdlog
                       Azure::azure-identity
                       Azure::azure-storage-blobs
-                      ${CMAKE_SOURCE_DIR}/build/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/libazure-core.a
-                      ${CMAKE_SOURCE_DIR}/build/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/libcrypto.a
-                      nlohmann_json::nlohmann_json
-                      # GNUTLS libraries are needed by static libnfs.
-                      ${GNUTLS_ALL_LIBRARIES})
+                      nlohmann_json::nlohmann_json)
 
 if(ENABLE_TCMALLOC)
 target_link_libraries(${CMAKE_PROJECT_NAME}
