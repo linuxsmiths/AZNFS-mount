@@ -354,7 +354,6 @@ find_library(GNUTLS_STATIC_LIB libgnutls.a REQUIRED)
 #
 if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
 execute_process(
-	#COMMAND bash -c "if [ ! -e ${GNUTLS_STATIC_LIB}.orig ]; then cp -vf ${GNUTLS_STATIC_LIB} ${GNUTLS_STATIC_LIB}.orig; ar dv ${GNUTLS_STATIC_LIB} aes-aarch64.o; fi"
 	COMMAND bash -c "cp -vf ${GNUTLS_STATIC_LIB} /tmp/gnutls.a; ar dv /tmp/gnutls.a aes-aarch64.o"
 	COMMAND_ERROR_IS_FATAL ANY)
 set(GNUTLS_STATIC_LIB /tmp/gnutls.a)

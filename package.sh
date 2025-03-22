@@ -8,9 +8,9 @@
 # Exit on error.
 set -e
 
+# Debian uses amd64/arm64 in place of x86_64/aarch64.
 if [ "$(uname -m)" == "x86_64" ]; then
 	arch="x86_64"
-	# Debian uses amd64 in place of x86_64.
 	debarch="amd64"
 elif [ "$(uname -m)" == "aarch64" ]; then
 	arch="aarch64"
