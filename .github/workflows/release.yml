@@ -1,0 +1,91 @@
+# --------------------------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for license information.
+# --------------------------------------------------------------------------------------------
+
+#
+# Release workflow for Mount Helper Script.
+#
+
+name: Create Official Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      versionName:
+        description: 'Version Name'
+        required: true
+      buildType:
+        type: choice
+        description: 'Build Type'
+        options:
+        - Release
+        - Debug
+        default: 'Release'
+
+permissions:
+  contents: write
+
+jobs:
+  verify_branch_name:
+    name: Verify Branch Name
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Extract Branch Name
+      run: | 
+        echo "branch_name=$(echo ${GITHUB_REF#refs/heads/})" >> $GITHUB_ENV
+    - name: Print Branch Name
+      run: |
+        echo "Release workflow will run for branch ${{ env.branch_name }}"
+    - name: Verify Branch Name
+      if: "!startsWith(env.branch_name, 'release/aznfs')"
+      run: |
+        echo "This workflow can be run only for release/aznfs* branch!"
+        echo "Branch Name: ${{ env.branch_name }}"
+        echo "Version: ${{ github.event.inputs.versionName }}"
+        exit 1
+  package_mount_helper:
+    name: Package and Release Mount Helper ${{ github.event.inputs.versionName }}
+    runs-on: ubuntu-22.04
+    needs: verify_branch_name
+    steps:
+    - name: Check Version Number
+      shell: bash
+      run: |
+        versionName=${{ github.event.inputs.versionName }}
+        if echo $versionName | grep -q "^0\."; then 
+            echo "Official Release version cannot be of the form 0.y.z" 
+            false
+        fi
+    - name: Install arm64 Cross-Compile Toolchain
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt install -y gcc-aarch64-linux-gnu libunwind-dev
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    - name: Run Package.sh
+      shell: bash
+      run: |
+        export RELEASE_NUMBER=${{ github.event.inputs.versionName }}
+        export STG_DIR=$GITHUB_WORKSPACE
+        export SOURCE_DIR=$GITHUB_WORKSPACE
+        export BUILD_TYPE=${{ github.events.inputs.buildType }}
+        chmod +x $GITHUB_WORKSPACE/package.sh
+        $GITHUB_WORKSPACE/package.sh
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ github.event.inputs.versionName }}
+        tag_name: ${{ github.event.inputs.versionName }}
+        target_commitish: ${{ github.sha }}
+        files: |
+          ${{ github.workspace }}/deb/aznfs-${{ github.event.inputs.versionName }}-1_amd64.deb
+          ${{ github.workspace }}/rpm/root/rpmbuild/RPMS/x86_64/aznfs-${{ github.event.inputs.versionName }}-1.x86_64.rpm
+          ${{ github.workspace }}/suse/root/rpmbuild/RPMS/x86_64/aznfs_sles-${{ github.event.inputs.versionName }}-1.x86_64.rpm
+          ${{ github.workspace }}/mariner/root/rpmbuild/RPMS/x86_64/aznfs_mariner-${{ github.event.inputs.versionName }}-1.x86_64.rpm
+          ${{ github.workspace }}/scripts/aznfs_install.sh
+          ${{ github.workspace }}/tarball/aznfs-${{ github.event.inputs.versionName }}-1.x86_64.tar.gz
+          ${{ github.workspace }}/tarball/aznfs-${{ github.event.inputs.versionName }}-1.arm64.tar.gz
+        body: |
+          New Release ${{ github.event.inputs.versionName }}

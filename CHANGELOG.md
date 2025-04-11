@@ -1,0 +1,65 @@
+## [2.0.10]- July 2024
+- [AZNFS-mount #138](https://github.com/Azure/AZNFS-mount/pull/138)
+  (NFSv3) Fixed artifacts to correctly reflect the source code from the specified branch instead of the default main branch.
+
+## [2.0.9]- July 2024
+- [AZNFS-mount #136](https://github.com/Azure/AZNFS-mount/pull/136)
+  (NFSv3) Resolved the minor and major device numbers from the combined device ID received from the stat call to update the read-ahead configuration.
+
+## [2.0.8]- July 2024
+- [AZNFS-mount #134](https://github.com/Azure/AZNFS-mount/pull/134)
+  (NFSv3) Implemented changes to support retry mount and adjusted read-ahead configuration for improved read throughput.
+
+## [2.0.7]- June 2024
+- [AZNFS-mount #122](https://github.com/Azure/AZNFS-mount/pull/122)
+  (NFSv3) Added support for isolated environments in FQDN using the AZURE_ENDPOINT_OVERRIDE environment variable.
+
+## [2.0.6]- June 2024
+- [AZNFS-mount #120](https://github.com/Azure/AZNFS-mount/pull/120)
+  (NFSv3) Enhanced mount script logs to utilize the -v or --verbose option.
+
+## [2.0.5]- May 2024
+- [AZNFS-mount #117](https://github.com/Azure/AZNFS-mount/pull/117)
+  (NFSv3) Added support to manage and limit the dirty bytes configuration on the user's machine.
+- [AZNFS-mount #116](https://github.com/Azure/AZNFS-mount/pull/116)
+  (NFSv3) Added support in mount-helper for AZNFS fingerprinting.
+
+## [2.0.4]- January 2024
+- [AZNFS-mount #110](https://github.com/Azure/AZNFS-mount/pull/110)
+  (NFSv3) Fixed a bug where proxy IP was being incorrectly computed in case of clash with an existing address from the host.
+
+## [2.0.3]- December 2023
+- [AZNFS-mount #98](https://github.com/Azure/AZNFS-mount/pull/98)
+  - (NFSv3) Fixed a bug when reconciling conntrack entries with multiple mounts to different accounts.
+  - (NFSv3) Fixed a bug to accurately fetch the mountpoint in case of multiple mounts to different containers on the same account.
+  - (NFSv3) Now we consult the mountmap for resolving regional account FQDN before we do the host lookup to ensure that multiple container mounts resolve to same the IP.
+
+## [2.0.2]- December 2023
+- [AZNFS-mount #97](https://github.com/Azure/AZNFS-mount/pull/97)
+  (NFSv3) Avoid user interaction completely in case of non-interactive setup. [Issue #96](https://github.com/Azure/AZNFS-mount/issues/96)
+
+## [2.0.1]- December 2023
+- [AZNFS-mount #94](https://github.com/Azure/AZNFS-mount/pull/94)
+  (NFSv3) Adding support for non-interactive installation for the package.
+- [AZNFS-mount #93](https://github.com/Azure/AZNFS-mount/pull/93)
+  (NFSv3) aznfswatchdog now logs version number on startup.
+
+## [2.0.0]- December 2023
+- [AZNFS-mount #89](https://github.com/Azure/AZNFS-mount/pull/89)
+  (NFSv3) Adding the resiliency and addressing hang issue for Regional Accounts with AZNFS-mount.
+- [AZNFS-mount #84](https://github.com/Azure/AZNFS-mount/pull/84)
+  (NFSv3) Introducing Auto-Update feature for AZNFS.
+
+## [1.0.10]- September 2023
+- [AZNFS-mount #79](https://github.com/Azure/AZNFS-mount/pull/79)
+  (NFSv3) Resolved a bug in aznfswatchdog introduced in an older version of bash.
+- [AZNFS-mount #78](https://github.com/Azure/AZNFS-mount/pull/78)
+  (NFSv3) Prevent mounting of shares when the Blob IP->FQDN entry is present in /etc/hosts.
+
+## [1.0.8] - August 2023
+- [AZNFS-mount #77](https://github.com/Azure/AZNFS-mount/pull/77)
+  (NFSv3) Added support for packaging a tarball for the arm64 architecture, specifically for the AKS CSI driver.
+
+## [1.0.7] - August 2023
+- [AZNFS-mount #76](https://github.com/Azure/AZNFS-mount/pull/76)
+  (NFSv3) Introduced support for AZNFS when used with the AKS CSI driver, packaging a tarball for amd64 architecture.

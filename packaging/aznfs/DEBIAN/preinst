@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# --------------------------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for license information.
+# --------------------------------------------------------------------------------------------
+
+# Exit on error.
+set -e
+
+init="$(ps -q 1 -o comm=)"
+if [ "$init" != "systemd" ]; then
+	echo "Cannot install this package on a non-systemd system!"
+	exit 1
+fi

@@ -1,0 +1,131 @@
+#!/bin/bash
+
+# --------------------------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for license information.
+# --------------------------------------------------------------------------------------------
+
+# Exit on error.
+set -e
+
+FLAG_FILE="/tmp/.update_in_progress_from_watchdog.flag"
+CONFIG_FILE="/opt/microsoft/aznfs/data/config"
+AUTO_UPDATE_AZNFS="false"
+
+parse_user_config()
+{
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "[BUG] $CONFIG_FILE not found, proceeding with default values..."
+        return
+    fi
+
+    # Read the value of AUTO_UPDATE_AZNFS from the configuration file and convert to lowercase for easy comparison later.
+    AUTO_UPDATE_AZNFS=$(egrep -o '^AUTO_UPDATE_AZNFS[[:space:]]*=[[:space:]]*[^[:space:]]*' "$CONFIG_FILE" | tr -d '[:blank:]' | cut -d '=' -f2)
+    AUTO_UPDATE_AZNFS=${AUTO_UPDATE_AZNFS,,}
+}
+
+user_consent_for_auto_update()
+{
+    parse_user_config
+
+    if [ "$AUTO_UPDATE_AZNFS" == "true" ]; then
+        return
+    fi
+
+    sed -i '/AUTO_UPDATE_AZNFS/d' "$CONFIG_FILE"
+
+    if [ "$DEBIAN_FRONTEND" == "noninteractive" ] || [ "$AZNFS_NONINTERACTIVE_INSTALL" == "1" ]; then
+        echo "AUTO_UPDATE_AZNFS=true" >> "$CONFIG_FILE"
+        return
+    fi
+
+    title="Enable auto update for AZNFS mount helper"
+    auto_update_prompt=$(cat << EOF
+    Stay up-to-date with the latest features, improvements, and security patches!
+
+    AUTO-UPDATE WILL JUST UPDATE THE MOUNT HELPER BINARY AND WILL NOT CAUSE ANY DISRUPTION TO MOUNTED SHARES.
+
+    We recommend enabling automatic updates for the best/seamless AZNFS experience.
+
+    You can turn off auto-update at any time from /opt/microsoft/aznfs/data/config.
+EOF
+)
+
+    if whiptail --title "$title" --yesno "$auto_update_prompt" 0 0; then
+        echo "AUTO_UPDATE_AZNFS=true" >> "$CONFIG_FILE"
+    else
+        echo "AUTO_UPDATE_AZNFS=false" >> "$CONFIG_FILE"
+    fi
+}
+
+# Set appropriate permissions.
+chmod 0755 /opt/microsoft/aznfs/
+chmod 0755 /usr/sbin/aznfswatchdog
+chmod 0755 /usr/sbin/aznfswatchdogv4
+chmod 0755 /opt/microsoft/aznfs/mountscript.sh
+chmod 0755 /opt/microsoft/aznfs/nfsv3mountscript.sh
+chmod 0755 /opt/microsoft/aznfs/nfsv4mountscript.sh
+chmod 0755 /opt/microsoft/aznfs/aznfs_install.sh
+chmod 0644 /opt/microsoft/aznfs/common.sh
+
+# Set suid bit for mount.aznfs to allow mount for non-super user.
+chmod 4755 /sbin/mount.aznfs
+
+# Create data directory for holding mountmap and log file. 
+mkdir -p /opt/microsoft/aznfs/data
+chmod 0755 /opt/microsoft/aznfs/data
+
+# Create log directory under /etc/stunnel to store stunnel logs
+mkdir -p /etc/stunnel/microsoft/aznfs/nfsv4_fileShare/logs
+chmod 0644 /etc/stunnel/microsoft/aznfs/nfsv4_fileShare/logs
+
+# Move the mountmap, aznfs.log and randbytes files to new path in case these files exists and package is being upgraded.
+if [ -f /opt/microsoft/aznfs/mountmap ]; then
+        chattr -f -i /opt/microsoft/aznfs/mountmap
+        mv -vf /opt/microsoft/aznfs/mountmap /opt/microsoft/aznfs/data/
+        chattr -f +i /opt/microsoft/aznfs/data/mountmap
+fi
+
+if [ -f /opt/microsoft/aznfs/aznfs.log ]; then
+        mv -vf /opt/microsoft/aznfs/aznfs.log /opt/microsoft/aznfs/data/
+fi
+
+if [ -f /opt/microsoft/aznfs/randbytes ]; then
+        chattr -f -i /opt/microsoft/aznfs/randbytes
+        mv -vf /opt/microsoft/aznfs/randbytes /opt/microsoft/aznfs/data/
+        chattr -f +i /opt/microsoft/aznfs/data/randbytes
+fi
+
+# Move the turbo sample config file to optdirdata if it exists.
+if [ -f /opt/microsoft/aznfs/sample-turbo-config.yaml ]; then
+        mv -vf /opt/microsoft/aznfs/sample-turbo-config.yaml /opt/microsoft/aznfs/data/
+fi
+
+# Check if the config file exists; if not, create it.
+if [ ! -f "$CONFIG_FILE" ]; then
+        # Create the config file and set default AUTO_UPDATE_AZNFS=false inside it.
+        echo "AUTO_UPDATE_AZNFS=false" > "$CONFIG_FILE"
+
+        # Set the permissions for the config file.
+        chmod 0644 "$CONFIG_FILE"
+fi
+
+#
+# If it's an auto update triggered by aznfswatchdog, don't restart watchdog.
+# Additionally, ask user about auto update configuration.
+#
+if [ ! -f "$FLAG_FILE" ]; then
+        user_consent_for_auto_update
+
+        # Start the watchdog service for NFSv3
+        systemctl daemon-reload
+        systemctl enable aznfswatchdog
+        systemctl start aznfswatchdog
+
+        # Start the watchdog service for NFSv4
+        systemctl enable aznfswatchdogv4
+        systemctl start aznfswatchdogv4
+else
+        # Clean up the update in progress flag file.
+        rm -f "$FLAG_FILE"
+fi
