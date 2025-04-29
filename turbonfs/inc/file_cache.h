@@ -436,6 +436,13 @@ struct membuf
      */
     void trim(uint64_t trim_len, bool left);
 
+    void set_deferred_release();
+
+    bool is_deferred_release() const
+    {
+        return deferred_release;
+    }
+
 private:
     /*
      * Lock to correctly read and update the membuf state.
@@ -565,6 +572,12 @@ private:
      * writing the membuf.
      */
     std::atomic<uint32_t> inuse = 0;
+
+    /*
+     * This flag will be set when release() avoids releasing the membuf
+     * due to failing of safe_to_release() check.
+     */
+    std::atomic<bool> deferred_release = false;
 };
 
 /**
@@ -1323,6 +1336,8 @@ public:
      * the file inode is forgotten by fuse and we don't want to keep the cache
      * anymore. For the latter case, clear_nolock() must be called with
      * shutdown param as true.
+     * This can also be called to release the deferred membufs in which case
+     * clear_only_deferred should be set to true.
      *
      * When shutdown is false, following chunks won't be released.
      * - Which are inuse.
@@ -1333,7 +1348,7 @@ public:
      * the file is no longer being used, so we release all chunks irrespective
      * of their current state.
      */
-    void clear_nolock(bool shutdown = false);
+    void clear_nolock(bool shutdown = false, bool clear_only_deferred = false);
 
     void clear(bool shutdown = false)
     {
@@ -1358,6 +1373,25 @@ public:
     bool test_and_clear_invalidate_pending()
     {
         return invalidate_pending.exchange(false);
+    }
+
+    /*
+     * Sets the deferred_release flag for this cache.
+     * This will be set when atleast one of the containing membuf has deferred_release
+     * set to true.
+     * This will be cleared when the filcache is next accessed.
+     */
+    void set_deferred_release()
+    {
+        deferred_release = true;
+    }
+
+    /**
+     * Atomically clear deferred_release and return the old value.
+     */
+    bool test_and_clear_deferred_release()
+    {
+        return deferred_release.exchange(false);
     }
 
     /**
@@ -1945,6 +1979,16 @@ private:
      * purge the cache before proceeding.
      */
     std::atomic<bool> invalidate_pending = false;
+
+    /*
+     * Flag to mark the cache as deferred_release w/o actually releasing
+     * the deferred membufs.
+     * This will be set when atleast one of the containing membuf has deferred_release
+     * set to true.
+     * Once this is set, next filecache lookup will start freeing all the membufs having
+     * deferred_release set and are safe to release.
+     */
+    std::atomic<bool> deferred_release = false;
 
     // Count of total active caches.
     static std::atomic<uint64_t> num_caches;
