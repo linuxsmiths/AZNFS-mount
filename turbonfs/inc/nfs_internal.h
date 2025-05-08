@@ -79,8 +79,8 @@ struct mount_options
     // Whether auth is required.
     const bool auth;
 
-    // AuthType: Currently we only support AzAuthAAD. 
-    const std::string authtype = "AzAuthAAD";
+    // AuthType: Currently we only support AzAuthAAD and AzAuthNone. 
+    std::string authtype = "AzAuthNone";
 
     // Add any other options as needed.
 
@@ -123,7 +123,7 @@ struct mount_options
     {
         std::string url(1024, '\0');
         // TODO: Take it from aznfsc_cfg.
-        const int debug = 1;
+        const int debug = 2;
 
         /*
          * For Blob NFS force nfsport and mountport to avoid portmapper
