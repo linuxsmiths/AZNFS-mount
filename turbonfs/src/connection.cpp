@@ -128,10 +128,10 @@ bool nfs_connection::open()
     assert(!client_id.empty());
 
     ret = nfs_set_auth_context(nfs_context,
-                                            mo.export_path.c_str(),
-                                            mo.authtype.c_str(),
-                                            client_version,
-                                            client_id.c_str());
+                                mo.export_path.c_str(),
+                                mo.authtype.c_str(),
+                                client_version,
+                                client_id.c_str());
     if (ret != 0) {
         AZLogError("Failed to set auth values in nfs context, "
                     "exportpath={} authtype={} "

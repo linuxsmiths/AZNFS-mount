@@ -619,10 +619,23 @@ auth_token_cb_res *get_auth_token_and_setargs_cb_none(struct auth_context *auth)
     }
 
     cb_res->azauth_data = strdup("None");
-    cb_res->expiry_time = static_cast<uint64_t>(time(NULL));
+    cb_res->expiry_time = static_cast<uint64_t>(time(NULL))+300;
 
     return cb_res;
 }
+
+uint64_t set_azauth_res_sc_cb(uint64_t server_cap_map)
+ {
+    if (server_cap_map == 1) {
+        if (!client_started) {
+            AZLogError("Client not started when get_azauth_res_cb is called");
+            return -1;
+        }
+    }
+
+    AZLogInfo("In get_azauth_Res_cb %llu",server_cap_map);
+    return 0;
+ }
 
 int main(int argc, char *argv[])
 {
@@ -813,6 +826,7 @@ int main(int argc, char *argv[])
     } else {
         set_auth_token_callback(get_auth_token_and_setargs_cb_none);
     }
+    set_azauth_res_callback(set_azauth_res_sc_cb);
 
     /*
      * Initialize nfs_client singleton.
