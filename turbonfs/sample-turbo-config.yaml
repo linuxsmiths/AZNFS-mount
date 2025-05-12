@@ -23,7 +23,7 @@ auth: false
 # readdir_maxcount
 # lookupcache: all|none|pos|positive
 #
-nconnect: 1
+nconnect: 96
 timeo: 600
 retrans: 2
 acregmin: 3

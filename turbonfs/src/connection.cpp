@@ -13,7 +13,7 @@
  * As of now we use the interface IPv4 address string, 
  * but it can be changed to anything else in future.
  */
- std::string get_clientid() {
+std::string get_clientid() {
     struct ifaddrs *ifaddr = nullptr;
     struct ifaddrs *ifa = nullptr;
     char ip[INET_ADDRSTRLEN] = {0};

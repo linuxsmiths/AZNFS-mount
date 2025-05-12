@@ -633,7 +633,7 @@ uint64_t set_azauth_res_sc_cb(uint64_t server_cap_map)
         }
     }
 
-    AZLogInfo("In get_azauth_Res_cb %llu",server_cap_map);
+    AZLogInfo("In get_azauth_res_cb %lu",server_cap_map);
     return 0;
  }
 
