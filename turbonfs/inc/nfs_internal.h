@@ -79,8 +79,8 @@ struct mount_options
     // Whether auth is required.
     const bool auth;
 
-    // AuthType: Currently we only support AzAuthAAD. 
-    const std::string authtype = "AzAuthAAD";
+    // AuthType: Currently we only support AzAuthAAD and AzAuthNone. 
+    std::string authtype = "AzAuthNone";
 
     // Add any other options as needed.
 
